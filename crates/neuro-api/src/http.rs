@@ -3,6 +3,7 @@
 //! Credentials and acquisition are deliberately absent from this module. The
 //! caller supplies an already validated, local `GraphService`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -89,6 +90,15 @@ pub fn router(graph: Arc<GraphService>) -> Router {
         )
         .with_state(AppState { graph })
         .layer(middleware::from_fn(local_boundary))
+}
+
+/// Serve the already validated graph on loopback only.
+pub async fn serve_loopback(graph: Arc<GraphService>, port: u16) -> std::io::Result<()> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    axum::serve(listener, router(graph))
+        .await
+        .map_err(std::io::Error::other)
 }
 
 async fn local_boundary(request: Request<axum::body::Body>, next: Next) -> Response {
