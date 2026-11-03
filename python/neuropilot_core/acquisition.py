@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +51,8 @@ DEFAULT_MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 TOKEN_PATTERN = re.compile(r"(?i)(api_token=)[^&\s]+")
 LOGGER = logging.getLogger(__name__)
+VERSIONS_DIRNAME = "versions"
+CURRENT_POINTER = "CURRENT.json"
 
 
 class AcquisitionError(RuntimeError):
@@ -149,27 +150,71 @@ def _rename_path(source: Path, destination: Path) -> None:
     source.rename(destination)
 
 
-def _publish_staged(staging: Path, output_dir: Path) -> None:
-    """Swap a complete staged directory into place, rolling back on failure."""
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    backup: Path | None = None
-    old_moved = False
+def _read_current_pointer(output_dir: Path) -> tuple[str, str]:
     try:
-        if output_dir.exists():
-            backup = Path(
-                tempfile.mkdtemp(prefix=f".{output_dir.name}.previous-", dir=output_dir.parent)
-            )
-            backup.rmdir()
-            _rename_path(output_dir, backup)
-            old_moved = True
-        _rename_path(staging, output_dir)
-    except BaseException:
-        if old_moved and backup is not None and not output_dir.exists():
-            _rename_path(backup, output_dir)
-        raise
-    else:
-        if backup is not None:
-            shutil.rmtree(backup)
+        pointer = json.loads((output_dir / CURRENT_POINTER).read_text(encoding="utf-8"))
+        version = pointer["version"]
+        manifest_sha256 = pointer["manifest_sha256"]
+    except (OSError, KeyError, TypeError, ValueError):
+        raise _safe_error("current FAFB publication pointer is invalid") from None
+    if (
+        not isinstance(version, str)
+        or not re.fullmatch(r"v-[0-9a-f]{16}", version)
+        or not isinstance(manifest_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+    ):
+        raise _safe_error("current FAFB publication pointer is invalid")
+    return version, manifest_sha256
+
+
+def resolve_current(output_dir: Path) -> Path:
+    """Resolve and validate the atomically selected complete dataset version."""
+    version, expected_hash = _read_current_pointer(output_dir)
+    version_dir = output_dir / VERSIONS_DIRNAME / version
+    manifest_path = version_dir / "manifest.json"
+    try:
+        manifest_bytes_value = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes_value)
+    except (OSError, ValueError):
+        raise _safe_error("current FAFB publication is incomplete") from None
+    if hashlib.sha256(manifest_bytes_value).hexdigest() != expected_hash:
+        raise _safe_error("current FAFB publication manifest hash mismatch")
+    try:
+        product_names = {product["name"] for product in manifest["products"]}
+    except (KeyError, TypeError):
+        raise _safe_error("current FAFB publication has incomplete product inventory") from None
+    if product_names != set(PRODUCTS):
+        raise _safe_error("current FAFB publication has incomplete product inventory")
+    if any(not (version_dir / f"{product}.csv.gz").is_file() for product in PRODUCTS):
+        raise _safe_error("current FAFB publication is missing a product")
+    return version_dir
+
+
+def _write_current_pointer(output_dir: Path, version: str, manifest_sha256: str) -> None:
+    payload = {
+        "manifest_sha256": manifest_sha256,
+        "version": version,
+    }
+    _atomic_write_bytes(output_dir / CURRENT_POINTER, manifest_bytes(payload))
+
+
+def _publish_staged(staging: Path, output_dir: Path) -> Path:
+    """Publish a validated staging directory through an atomic pointer switch."""
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    versions_dir = output_dir / VERSIONS_DIRNAME
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    staged_manifest = staging / "manifest.json"
+    manifest_hash = hashlib.sha256(staged_manifest.read_bytes()).hexdigest()
+    version = f"v-{manifest_hash[:16]}"
+    version_dir = versions_dir / version
+    if version_dir.exists():
+        raise _safe_error("publication version already exists")
+    _rename_path(staging, version_dir)
+    if not (version_dir / "manifest.json").is_file():
+        raise _safe_error("staged publication is incomplete")
+    _write_current_pointer(output_dir, version, manifest_hash)
+    return resolve_current(output_dir)
 
 
 def manifest_bytes(manifest: dict[str, object]) -> bytes:
@@ -398,7 +443,10 @@ class CodexAcquirer:
                     "threshold_policy": "pair-level-sum-across-neuropils",
                     "threshold_synapses": threshold.threshold,
                 },
-                "products": [observation.__dict__ for observation in observations],
+                "products": [
+                    {"name": observation.product, **observation.__dict__}
+                    for observation in observations
+                ],
             }
             _atomic_write_bytes(staging / "manifest.json", manifest_bytes(manifest))
             _publish_staged(staging, output_dir)

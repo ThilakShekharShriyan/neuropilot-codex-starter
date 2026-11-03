@@ -16,6 +16,7 @@ from neuropilot_core.acquisition import (
     _publish_staged,
     manifest_bytes,
     redact,
+    resolve_current,
 )
 from neuropilot_core.fixtures import synthetic_bundle
 
@@ -298,12 +299,13 @@ def test_acquire_all_writes_token_free_manifest_and_all_products(tmp_path: Path)
         observations = acquirer.acquire_all()
 
     assert tuple(observation.product for observation in observations) == PRODUCTS
-    manifest = (tmp_path / "manifest.json").read_bytes()
+    current = resolve_current(tmp_path)
+    manifest = (current / "manifest.json").read_bytes()
     assert b"secret-token" not in manifest
     assert b"api_token=<redacted>" in manifest
     assert b'"pairs_below_five":1' in manifest
     assert b'"source_rows_below_five":3' in manifest
-    assert all((tmp_path / f"{product}.csv.gz").exists() for product in PRODUCTS)
+    assert all((current / f"{product}.csv.gz").exists() for product in PRODUCTS)
 
 
 def test_bundle_validation_failure_removes_previously_finalized_products(tmp_path: Path) -> None:
@@ -379,22 +381,38 @@ def test_publication_failure_rolls_back_complete_previous_dataset(
 ) -> None:
     output = tmp_path / "fafb_v783"
     staging = tmp_path / ".fafb-v783-staging-test"
-    output.mkdir()
+    old_version = "v-1111111111111111"
+    old_version_dir = output / "versions" / old_version
+    old_version_dir.mkdir(parents=True)
     staging.mkdir()
+    old_manifest = {
+        "products": [{"name": product} for product in PRODUCTS],
+        "version": old_version,
+    }
     previous = {
         "neurons.csv.gz": b"old-neurons",
         "classification.csv.gz": b"old-classification",
         "consolidated_cell_types.csv.gz": b"old-types",
         "connections_princeton.csv.gz": b"old-connections",
-        "manifest.json": b"old-manifest",
     }
     replacement = {
         name: value.replace(b"old-", b"new-") for name, value in previous.items()
     }
     for name, value in previous.items():
-        (output / name).write_bytes(value)
+        (old_version_dir / name).write_bytes(value)
+    old_manifest_bytes = manifest_bytes(old_manifest)
+    (old_version_dir / "manifest.json").write_bytes(old_manifest_bytes)
+    (output / "CURRENT.json").write_bytes(
+        manifest_bytes(
+            {
+                "manifest_sha256": hashlib.sha256(old_manifest_bytes).hexdigest(),
+                "version": old_version,
+            }
+        )
+    )
     for name, value in replacement.items():
         (staging / name).write_bytes(value)
+    (staging / "manifest.json").write_bytes(manifest_bytes({"products": []}))
 
     original_rename = acquisition._rename_path
 
@@ -407,9 +425,85 @@ def test_publication_failure_rolls_back_complete_previous_dataset(
     with pytest.raises(OSError, match="injected publication failure"):
         _publish_staged(staging, output)
 
-    assert {path.name: path.read_bytes() for path in output.iterdir()} == previous
-    assert {path.name: path.read_bytes() for path in staging.iterdir()} == replacement
-    assert not list(tmp_path.glob(".fafb_v783.previous-*"))
+    current = resolve_current(output)
+    assert current == old_version_dir
+    assert {
+        path.name: path.read_bytes()
+        for path in current.iterdir()
+        if path.name != "manifest.json"
+    } == previous
+    assert (current / "manifest.json").read_bytes() == old_manifest_bytes
+    assert {
+        path.name: path.read_bytes()
+        for path in staging.iterdir()
+        if path.name != "manifest.json"
+    } == replacement
+
+
+def test_pointer_switch_failure_preserves_previous_complete_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "fafb_v783"
+    old_version = "v-2222222222222222"
+    old_version_dir = output / "versions" / old_version
+    old_version_dir.mkdir(parents=True)
+    old_manifest = {"products": [{"name": product} for product in PRODUCTS]}
+    old_manifest_bytes = manifest_bytes(old_manifest)
+    for product in PRODUCTS:
+        (old_version_dir / f"{product}.csv.gz").write_bytes(b"old")
+    (old_version_dir / "manifest.json").write_bytes(old_manifest_bytes)
+    (output / "CURRENT.json").write_bytes(
+        manifest_bytes(
+            {
+                "manifest_sha256": hashlib.sha256(old_manifest_bytes).hexdigest(),
+                "version": old_version,
+            }
+        )
+    )
+    staging = tmp_path / ".fafb-v783-staging-test"
+    staging.mkdir()
+    for product in PRODUCTS:
+        (staging / f"{product}.csv.gz").write_bytes(b"new")
+    new_manifest_bytes = manifest_bytes({"products": [{"name": product} for product in PRODUCTS]})
+    (staging / "manifest.json").write_bytes(new_manifest_bytes)
+
+    def fail_pointer(output_dir: Path, version: str, manifest_sha256: str) -> None:
+        raise OSError("injected pointer failure")
+
+    monkeypatch.setattr("neuropilot_core.acquisition._write_current_pointer", fail_pointer)
+    with pytest.raises(OSError, match="injected pointer failure"):
+        _publish_staged(staging, output)
+
+    assert resolve_current(output) == old_version_dir
+    assert all(
+        (old_version_dir / f"{product}.csv.gz").read_bytes() == b"old"
+        for product in PRODUCTS
+    )
+
+
+def test_interrupted_publication_state_recovers_previous_pointer(tmp_path: Path) -> None:
+    output = tmp_path / "fafb_v783"
+    old_version = "v-3333333333333333"
+    old_version_dir = output / "versions" / old_version
+    old_version_dir.mkdir(parents=True)
+    old_manifest = {"products": [{"name": product} for product in PRODUCTS]}
+    old_manifest_bytes = manifest_bytes(old_manifest)
+    for product in PRODUCTS:
+        (old_version_dir / f"{product}.csv.gz").write_bytes(b"old")
+    (old_version_dir / "manifest.json").write_bytes(old_manifest_bytes)
+    (output / "CURRENT.json").write_bytes(
+        manifest_bytes(
+            {
+                "manifest_sha256": hashlib.sha256(old_manifest_bytes).hexdigest(),
+                "version": old_version,
+            }
+        )
+    )
+    orphan = output / "versions" / "v-4444444444444444"
+    orphan.mkdir()
+    (orphan / "manifest.json").write_bytes(b"incomplete")
+
+    assert resolve_current(output) == old_version_dir
 
 
 def test_manifest_serialization_is_deterministic_and_token_free() -> None:

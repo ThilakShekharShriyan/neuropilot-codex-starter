@@ -131,6 +131,11 @@ fails closed before any product request. A future acquisition may proceed only
 after an official inventory mechanism is documented and implemented.
 
 Retry delays use bounded exponential backoff plus capped random jitter. The
-four products are downloaded into a unique staging directory, validated as a
-complete bundle, and published by directory swap with rollback; a failed stage
-or manifest write cannot replace a previous complete output.
+four products are downloaded into a unique staging directory and validated as a
+complete bundle. Successful bundles are stored under a versioned directory;
+`CURRENT.json` is replaced atomically only after that directory and its
+manifest are complete. Readers resolve `CURRENT.json`, verify the manifest hash
+and all four product files, and therefore never consume a partially published
+version. A failed stage, pointer write, or process interruption leaves the
+previous pointer unchanged; an orphaned version is ignored and can be cleaned
+up later.
