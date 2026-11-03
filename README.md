@@ -27,6 +27,13 @@ Do not rewrite FlyGym or MuJoCo in Rust. Integrate the scientific simulator thro
    cargo run -p neuropilot-hello
    pnpm --dir apps/dashboard dev
    ```
+   For a transport-only smoke test, run the explicitly synthetic graph server:
+   ```bash
+   cargo run -p neuro-api --example synthetic_server
+   ```
+   This fixture is not FAFB and must not be used as biological evidence. The
+   dashboard labels graph coordinates as abstract layout coordinates and never
+   treats them as anatomy.
 5. Ask Codex to inspect the repository and propose a minimal Milestone 0 implementation:
    > Read AGENTS.md, plan.md, skills.md. Do not implement future milestones. Inspect my machine and repository, report missing prerequisites, and propose the smallest verified Milestone 0.
 6. Work milestone by milestone. Do not advance until the acceptance checklist is met.
