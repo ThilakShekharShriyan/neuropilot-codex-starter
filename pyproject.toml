@@ -1,0 +1,23 @@
+[project]
+name = "neuropilot"
+version = "0.1.0"
+description = "Reproducible local-first NeuroPilot research platform"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0,<9",
+  "ruff>=0.8,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+pythonpath = ["python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
