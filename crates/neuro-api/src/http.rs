@@ -8,8 +8,9 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -24,11 +25,21 @@ pub struct AppState {
 #[derive(Debug, Deserialize)]
 pub struct ConnectionParams {
     pub direction: String,
+    #[serde(default = "default_limit")]
     pub limit: usize,
     pub cursor: Option<String>,
+    #[serde(default = "default_min_synapses")]
     pub min_synapses: u64,
     #[serde(default)]
     pub aggregate: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    pub root_id: Option<String>,
+    pub primary_type: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +54,23 @@ struct NeuronResponse {
 struct ErrorResponse {
     code: &'static str,
     message: &'static str,
+    request_id: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResponse {
+    dataset: crate::DatasetRef,
+    schema_version: u32,
+    provenance_ref: String,
+    neurons: Vec<crate::Neuron>,
+}
+
+fn default_limit() -> usize {
+    10
+}
+
+fn default_min_synapses() -> u64 {
+    5
 }
 
 pub fn router(graph: Arc<GraphService>) -> Router {
@@ -55,7 +83,67 @@ pub fn router(graph: Arc<GraphService>) -> Router {
             "/api/v1/datasets/{dataset}/{snapshot}/neurons/{root_id}/connections",
             get(get_connections),
         )
+        .route(
+            "/api/v1/datasets/{dataset}/{snapshot}/neurons",
+            get(search_neurons),
+        )
         .with_state(AppState { graph })
+        .layer(middleware::from_fn(local_boundary))
+}
+
+async fn local_boundary(request: Request<axum::body::Body>, next: Next) -> Response {
+    if let Some(host) = request.headers().get("host") {
+        let valid_host = host
+            .to_str()
+            .ok()
+            .map(|value| {
+                matches!(
+                    value,
+                    "127.0.0.1"
+                        | "127.0.0.1:80"
+                        | "127.0.0.1:3000"
+                        | "127.0.0.1:5173"
+                        | "localhost"
+                        | "localhost:80"
+                        | "localhost:3000"
+                        | "localhost:5173"
+                        | "[::1]"
+                        | "[::1]:80"
+                        | "[::1]:3000"
+                        | "[::1]:5173"
+                )
+            })
+            .unwrap_or(false);
+        if !valid_host {
+            return error(StatusCode::BAD_REQUEST, "invalid_host", "host is not local");
+        }
+    }
+    let origin = request.headers().get("origin").cloned();
+    if let Some(origin_value) = &origin {
+        let valid_origin = matches!(
+            origin_value.to_str().ok(),
+            Some("http://localhost:5173") | Some("http://127.0.0.1:5173")
+        );
+        if !valid_origin {
+            return error(
+                StatusCode::FORBIDDEN,
+                "invalid_origin",
+                "origin is not allowed",
+            );
+        }
+    }
+    let mut response = next.run(request).await;
+    if let Some(origin) = origin {
+        if let Ok(value) = HeaderValue::from_bytes(origin.as_bytes()) {
+            response
+                .headers_mut()
+                .insert("access-control-allow-origin", value);
+            response
+                .headers_mut()
+                .insert("vary", HeaderValue::from_static("Origin"));
+        }
+    }
+    response
 }
 
 async fn get_neuron(
@@ -113,6 +201,37 @@ async fn get_connections(
     };
     match state.graph.query_connections(&query) {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error_value) => query_error(error_value),
+    }
+}
+
+async fn search_neurons(
+    State(state): State<AppState>,
+    Path((dataset, snapshot)): Path<(String, String)>,
+    Query(params): Query<SearchParams>,
+) -> impl IntoResponse {
+    if dataset != state.graph.dataset().id || snapshot != state.graph.dataset().snapshot {
+        return error(
+            StatusCode::NOT_FOUND,
+            "dataset_not_found",
+            "dataset is unavailable",
+        );
+    }
+    match state.graph.search_neurons(
+        params.root_id.as_deref(),
+        params.primary_type.as_deref(),
+        params.limit,
+    ) {
+        Ok(neurons) => (
+            StatusCode::OK,
+            Json(SearchResponse {
+                dataset: state.graph.dataset().clone(),
+                schema_version: 1,
+                provenance_ref: state.graph.provenance_ref().to_string(),
+                neurons,
+            }),
+        )
+            .into_response(),
         Err(error_value) => query_error(error_value),
     }
 }
@@ -179,7 +298,15 @@ fn error(
     code: &'static str,
     message: &'static str,
 ) -> axum::response::Response {
-    (status, Json(ErrorResponse { code, message })).into_response()
+    (
+        status,
+        Json(ErrorResponse {
+            code,
+            message,
+            request_id: "local",
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -252,5 +379,49 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_returns_source_backed_neurons() {
+        let response = router(graph())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/datasets/synthetic/fixture-1/neurons?primary_type=source")
+                    .header("host", "127.0.0.1:5173")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn local_boundary_rejects_non_local_host_and_origin() {
+        let invalid_host = router(graph())
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/datasets/synthetic/fixture-1/neurons/100")
+                    .header("host", "evil.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invalid_host.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_origin = router(graph())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/datasets/synthetic/fixture-1/neurons/100")
+                    .header("host", "127.0.0.1:5173")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invalid_origin.status(), StatusCode::FORBIDDEN);
     }
 }

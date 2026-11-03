@@ -128,6 +128,34 @@ impl GraphService {
         &self.provenance_ref
     }
 
+    pub fn search_neurons(
+        &self,
+        root_id: Option<&str>,
+        primary_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Neuron>, QueryError> {
+        if limit == 0 || limit > self.page_limit_max {
+            return Err(QueryError::InvalidLimit);
+        }
+        if let Some(root_id) = root_id {
+            if !is_ascii_root_id(root_id) {
+                return Err(QueryError::InvalidRootId);
+            }
+        }
+        let results = self
+            .neurons
+            .values()
+            .filter(|neuron| root_id.is_none_or(|id| neuron.root_id == id))
+            .filter(|neuron| {
+                primary_type
+                    .is_none_or(|requested| neuron.primary_type.as_deref() == Some(requested))
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(results)
+    }
+
     pub fn new(
         dataset: DatasetRef,
         schema_version: u32,
