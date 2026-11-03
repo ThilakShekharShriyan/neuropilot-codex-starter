@@ -4,6 +4,9 @@ body { margin: 0; min-width: 320px; }
 button, input { font: inherit; }
 button { cursor: pointer; border: 1px solid #344056; border-radius: 8px; color: #e9eef8; background: #182031; padding: 10px 14px; }
 button:hover, button.selected { border-color: #78b7ff; background: #223452; }
+button:focus-visible { outline: 3px solid #f4c95d; outline-offset: 2px; }
+button.danger { border-color: #9a4e4e; background: #3a1f26; }
+button.danger:hover { border-color: #ff9a9a; background: #54252c; }
 button:disabled { opacity: .55; cursor: wait; }
 .app-shell { max-width: 1180px; margin: 0 auto; padding: 30px; }
 .topbar, .panel-heading, .control-panel { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
@@ -25,6 +28,8 @@ input { width: 260px; border: 1px solid #344056; border-radius: 8px; padding: 10
 .graph-panel { margin-top: 24px; overflow: hidden; border: 1px solid #222b3c; border-radius: 14px; background: #111722; }
 .simulation-panel { margin-top: 24px; display: grid; gap: 10px; padding: 18px 20px; border: 1px solid #3d4938; border-radius: 14px; background: #121a16; }
 .simulation-panel.degraded { border-color: #6b4c3c; background: #201713; }
+.m4-control { margin-top: 16px; align-items: end; }
+.m4-control p, .m4-control small { color: #b9a7a7; }
 .simulation-panel p, .simulation-panel small { color: #9bb39f; font-size: .82rem; }
 .simulation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .panel-heading { padding: 18px 20px; }

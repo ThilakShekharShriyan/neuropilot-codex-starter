@@ -11,6 +11,9 @@ type ConnectionResponse = { nodes: Neuron[]; edges: Edge[]; truncated: boolean; 
 type SearchResponse = { neurons: Neuron[]; provenance_ref: string; provenance: SourceProvenance };
 type SimulationState = { data_kind: "simulated-live"; session_id: string; status: "live" | "closed"; step_count: number; step_latency_ms: number | null; time: number; joint_angles: number[]; joint_velocities: number[]; body_positions: number[][] };
 type SimulationMetrics = { data_kind: "simulated-live"; session_id: string; status: "live" | "closed"; request_count: number; error_count: number; reset_count: number; step_count: number; last_step_latency_ms: number | null };
+type ControlStatus = { schema_version: 1; data_kind: "simulated-live"; control_session_id: string; simulator_session_id: string; status: "paused" | "active" | "stopped" | "disconnected"; simulator_status: "live" | "closed"; control_authority: number; watchdog_timeout_ms: number; queue_capacity: number; channels: ["forward", "lateral", "turn"]; actuator_count: number; sequence: number; watchdog_trips: number; stop_count: number; pause_count: number; resume_count: number; neutralization_count: number; last_control_sequence: number; last_control_latency_ms: number | null };
+type ControlChannels = { forward: number; lateral: number; turn: number };
+type ControlResponse = { control_session_id: string; sequence: number; forwarded: boolean; state?: SimulationState };
 
 const dataset = import.meta.env.VITE_DATASET_ID ?? "flywire-fafb";
 const snapshot = import.meta.env.VITE_SNAPSHOT ?? "783";
@@ -137,6 +140,90 @@ function App() {
   const [simulation, setSimulation] = useState<SimulationState | null>(null);
   const [metrics, setMetrics] = useState<SimulationMetrics | null>(null);
   const [simulationStatus, setSimulationStatus] = useState<"idle" | "loading" | "closed" | "error">("idle");
+  const [control, setControl] = useState<ControlStatus | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const controlStatusRef = useRef<ControlStatus["status"]>("disconnected");
+  const controlSequenceRef = useRef(0);
+  const controlChannelsRef = useRef<ControlChannels>({ forward: 0, lateral: 0, turn: 0 });
+  controlStatusRef.current = control?.status ?? "disconnected";
+
+  const updateControl = (value: ControlStatus) => {
+    setControl(value);
+    controlStatusRef.current = value.status;
+    controlSequenceRef.current = value.last_control_sequence;
+  };
+
+  const controlAction = async (action: "session" | "resume" | "pause" | "stop" | "heartbeat" | "reset") => {
+    setControlError(null);
+    try {
+      const current = action === "session"
+        ? await postJson<ControlStatus>("/api/v1/control/session")
+        : action === "reset"
+          ? await postJson<ControlStatus>("/api/v1/control/reset")
+          : await postJson<ControlStatus>(`/api/v1/control/${action}`, { control_session_id: control?.control_session_id ?? "" });
+      updateControl(current);
+      if (action === "reset" && current.simulator_status === "live") {
+        const latest = await getJson<SimulationState>("/api/v1/simulation/state");
+        setSimulation(latest);
+      }
+    } catch (reason) {
+      setControlError(reason instanceof Error ? reason.message : "Control service unavailable.");
+    }
+  };
+
+  const sendControl = async (channels: ControlChannels, mode: "active" | "neutral") => {
+    if (controlStatusRef.current !== "active" || !control?.control_session_id) return;
+    controlChannelsRef.current = channels;
+    const sequence = controlSequenceRef.current + 1;
+    controlSequenceRef.current = sequence;
+    try {
+      const result = await postJson<ControlResponse>("/api/v1/control/input", {
+        schema_version: 1,
+        control_session_id: control.control_session_id,
+        sequence,
+        issued_at_ms: Date.now(),
+        control: channels,
+        source: "keyboard",
+        mode,
+      });
+      if (result.state) setSimulation(result.state);
+    } catch (reason) {
+      setControlError(reason instanceof Error ? reason.message : "Control input failed.");
+    }
+  };
+
+  const sendControlRef = useRef(sendControl);
+  sendControlRef.current = sendControl;
+
+  useEffect(() => {
+    const keyMap: Record<string, keyof ControlChannels> = { ArrowUp: "forward", w: "forward", ArrowDown: "forward", s: "forward", ArrowLeft: "turn", a: "turn", ArrowRight: "turn", d: "turn", q: "lateral", e: "lateral" };
+    const pressed = new Set<string>();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "BUTTON"].includes(event.target.tagName)) return;
+      const channel = keyMap[event.key];
+      if (!channel || controlStatusRef.current !== "active") return;
+      event.preventDefault();
+      if (pressed.has(event.key)) return;
+      pressed.add(event.key);
+      const direction = ["ArrowDown", "s", "ArrowLeft", "a", "q"].includes(event.key) ? -1 : 1;
+      const next = { ...controlChannelsRef.current, [channel]: direction * 1 };
+      void sendControlRef.current(next, "active");
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const channel = keyMap[event.key];
+      if (!channel) return;
+      pressed.delete(event.key);
+      if (controlStatusRef.current !== "active") return;
+      const next = { ...controlChannelsRef.current, [channel]: 0 };
+      void sendControlRef.current(next, "neutral");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   const loadGraph = async () => {
     if (!/^\d+$/.test(rootId)) {
@@ -222,6 +309,7 @@ function App() {
       {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
       <section className={`simulation-panel ${simulationStatus === "error" ? "degraded" : ""}`} aria-label="CPU simulation controls"><div><span className="eyebrow">M2 / SIMULATED LIVE</span><h2>NeuroMechFly CPU session</h2><p>{simulation ? `session ${simulation.session_id} · ${simulation.status} · t = ${simulation.time.toFixed(4)} s · ${simulation.step_count} steps · last step ${simulation.step_latency_ms?.toFixed(2) ?? "—"} ms` : simulationStatus === "closed" ? "Session closed" : simulationStatus === "error" ? "Simulation disconnected or invalid" : "No simulation state loaded"}</p>{metrics && <small>Requests {metrics.request_count} · errors {metrics.error_count} · resets {metrics.reset_count}</small>}</div><div className="simulation-actions"><button onClick={() => simulationAction("state")} disabled={simulationStatus === "loading"}>State</button><button onClick={() => simulationAction("metrics")} disabled={simulationStatus === "loading"}>Telemetry</button><button onClick={() => simulationAction("reset")} disabled={simulationStatus === "loading"}>Reset</button><button onClick={() => simulationAction("restart")} disabled={simulationStatus === "loading"}>Restart</button><button onClick={() => simulationAction("step")} disabled={simulationStatus === "loading" || simulationStatus === "closed"}>Step</button><button onClick={() => simulationAction("close")} disabled={simulationStatus === "loading" || simulationStatus === "closed"}>Close</button></div><small>Observed state from the CPU simulator; not connectome activity or anatomical coordinates.</small></section>
+      <section className="control-panel m4-control" aria-label="M4 simulated keyboard control"><div><span className="eyebrow">M4 / SIMULATED CONTROL</span><h2>Keyboard input</h2><p>{control ? `control ${control.status} · session ${control.control_session_id} · watchdog ${control.watchdog_timeout_ms} ms` : "No control session attached"}</p><small>W/S or ↑/↓: forward · A/D or ←/→: turn · Q/E: lateral</small>{controlError && <p className="notice error" role="alert">{controlError}</p>}</div><div className="simulation-actions"><button onClick={() => void controlAction("session")} disabled={control?.status === "active"}>Connect</button><button onClick={() => void controlAction("resume")} disabled={!control || control.status === "active" || control.status === "disconnected"}>Resume</button><button onClick={() => void controlAction("pause")} disabled={!control || control.status !== "active"}>Pause</button><button className="danger" onClick={() => void controlAction("stop")} disabled={!control || control.status === "stopped" || control.status === "disconnected"}>Emergency stop</button><button onClick={() => void controlAction("reset")} disabled={!control}>Reset control</button><button onClick={() => void controlAction("heartbeat")} disabled={!control || control.status !== "active"}>Heartbeat</button></div><small>Engineering control only · no connectome or biological motor mapping · stop requires reset before resume.</small></section>
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
         {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref} · source manifest {connections.provenance.source_manifest_sha256.slice(0, 12)}… · {connections.provenance.products.length} source files{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
       </section>
