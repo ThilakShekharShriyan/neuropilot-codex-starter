@@ -12,7 +12,7 @@ from flygym.compose import ActuatorType, FlatGroundWorld, NeuroMechFly
 from flygym.utils.math import Rotation3D
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlySimulationConfig:
     """Configuration captured with every M2 run."""
 

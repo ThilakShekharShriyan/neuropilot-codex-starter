@@ -74,6 +74,19 @@ def test_non_finite_control_is_rejected() -> None:
         service.close()
 
 
+def test_restart_creates_new_session_and_resets_metrics() -> None:
+    service = SimulationService(FlySimulation())
+    first_session = service.session_id
+    service.reset()
+    service.step(None)
+    restarted = service.restart()
+    assert restarted["session_id"] != first_session
+    assert restarted["status"] == "live"
+    assert restarted["step_count"] == 0
+    assert service.metrics()["reset_count"] == 0
+    service.close()
+
+
 def test_concurrent_requests_count_without_lost_increments() -> None:
     service = SimulationService(FlySimulation())
     server = make_server(service, 0)

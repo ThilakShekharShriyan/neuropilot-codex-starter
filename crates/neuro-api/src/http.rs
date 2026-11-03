@@ -108,6 +108,10 @@ pub fn router_with_simulation(
             axum::routing::post(simulation_reset),
         )
         .route(
+            "/api/v1/simulation/restart",
+            axum::routing::post(simulation_restart),
+        )
+        .route(
             "/api/v1/simulation/step",
             axum::routing::post(simulation_step),
         )
@@ -318,6 +322,20 @@ async fn simulation_reset(State(state): State<AppState>) -> Response {
         );
     };
     match simulation.reset().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn simulation_restart(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.restart().await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error_value) => gateway_error(error_value),
     }

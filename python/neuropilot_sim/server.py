@@ -29,6 +29,7 @@ def _state_payload(state: FlyState) -> dict[str, Any]:
 class SimulationService:
     def __init__(self, simulation: FlySimulation) -> None:
         self.simulation = simulation
+        self.config = simulation.config
         self.lock = threading.Lock()
         self.session_id = secrets.token_hex(8)
         self.status = "live"
@@ -75,6 +76,19 @@ class SimulationService:
         with self.lock:
             self.simulation.close()
             self.status = "closed"
+
+    def restart(self) -> dict[str, Any]:
+        with self.lock:
+            self.simulation.close()
+            self.simulation = FlySimulation(self.config)
+            self.session_id = secrets.token_hex(8)
+            self.status = "live"
+            self.step_count = 0
+            self.reset_count = 0
+            self.request_count = 0
+            self.error_count = 0
+            self.last_step_latency_ms = None
+            return self._payload(self.simulation.reset())
 
     def metrics(self) -> dict[str, Any]:
         with self.lock:
@@ -173,6 +187,8 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                             "session_id": service.session_id,
                         },
                     )
+                elif self.path == "/api/v1/simulation/restart":
+                    self._send(200, service.restart())
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:

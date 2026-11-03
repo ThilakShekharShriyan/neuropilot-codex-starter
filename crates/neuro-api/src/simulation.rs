@@ -127,6 +127,15 @@ impl SimulationGateway {
         .await
     }
 
+    pub async fn restart(&self) -> Result<SimulationState, GatewayError> {
+        self.request(
+            self.client
+                .post(self.url("/api/v1/simulation/restart"))
+                .json(&serde_json::json!({})),
+        )
+        .await
+    }
+
     pub async fn step(&self, control: Option<Vec<f64>>) -> Result<SimulationState, GatewayError> {
         if let Some(values) = &control {
             if values.len() > MAX_CONTROL_VALUES || values.iter().any(|value| !value.is_finite()) {
@@ -355,5 +364,15 @@ mod tests {
         });
         assert!(gateway.state().await.is_ok());
         let _ = restarted.await;
+    }
+
+    #[tokio::test]
+    async fn restart_returns_a_valid_fresh_state() {
+        let (port, task) = mock_once(200, valid_body(), Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(gateway.restart().await.unwrap().status, "live");
+        let _ = task.await;
     }
 }
