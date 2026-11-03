@@ -48,6 +48,7 @@ struct NeuronResponse {
     dataset: crate::DatasetRef,
     schema_version: u32,
     provenance_ref: String,
+    provenance: crate::SourceProvenance,
     neuron: crate::Neuron,
 }
 
@@ -63,6 +64,7 @@ struct SearchResponse {
     dataset: crate::DatasetRef,
     schema_version: u32,
     provenance_ref: String,
+    provenance: crate::SourceProvenance,
     neurons: Vec<crate::Neuron>,
 }
 
@@ -177,6 +179,7 @@ async fn get_neuron(
                 dataset: state.graph.dataset().clone(),
                 schema_version: 1,
                 provenance_ref: state.graph.provenance_ref().to_string(),
+                provenance: state.graph.source_provenance().clone(),
                 neuron,
             }),
         )
@@ -241,6 +244,7 @@ async fn search_neurons(
                 dataset: state.graph.dataset().clone(),
                 schema_version: 1,
                 provenance_ref: state.graph.provenance_ref().to_string(),
+                provenance: state.graph.source_provenance().clone(),
                 neurons,
             }),
         )

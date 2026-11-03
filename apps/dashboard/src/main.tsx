@@ -5,8 +5,10 @@ import "./styles.css";
 
 type Neuron = { root_id: string; primary_type: string | null };
 type Edge = { pre_root_id: string; post_root_id: string; neuropil: string; synapse_count: number; nt_type: string | null };
-type ConnectionResponse = { nodes: Neuron[]; edges: Edge[]; truncated: boolean; next_cursor: string | null; provenance_ref: string };
-type SearchResponse = { neurons: Neuron[]; provenance_ref: string };
+type ProductProvenance = { name: string; filename: string; sha256: string; row_count: number; source_product: string };
+type SourceProvenance = { source_manifest_sha256: string; license: string; citations: string[]; products: ProductProvenance[] };
+type ConnectionResponse = { nodes: Neuron[]; edges: Edge[]; truncated: boolean; next_cursor: string | null; provenance_ref: string; provenance: SourceProvenance };
+type SearchResponse = { neurons: Neuron[]; provenance_ref: string; provenance: SourceProvenance };
 
 const dataset = import.meta.env.VITE_DATASET_ID ?? "flywire-fafb";
 const snapshot = import.meta.env.VITE_SNAPSHOT ?? "783";
@@ -166,7 +168,7 @@ function App() {
       {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
-        {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref}{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
+        {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref} · source manifest {connections.provenance.source_manifest_sha256.slice(0, 12)}… · {connections.provenance.products.length} source files{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
       </section>
       <footer>Observed records only · no biological coordinates · credentials never enter the browser</footer>
     </main>

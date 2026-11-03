@@ -35,6 +35,10 @@ def normalize(input_dir: Path, output_dir: Path) -> dict[str, object]:
     """Normalize the current acquired version without inventing annotations."""
     version_dir = resolve_current(input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_manifest_path = version_dir / "manifest.json"
+    source_manifest_bytes = source_manifest_path.read_bytes()
+    source_manifest = json.loads(source_manifest_bytes)
+    source_manifest_hash = hashlib.sha256(source_manifest_bytes).hexdigest()
 
     annotations: dict[str, dict[str, object]] = {}
     with _rows(version_dir / "classification.csv.gz") as handle:
@@ -107,6 +111,24 @@ def normalize(input_dir: Path, output_dir: Path) -> dict[str, object]:
         "snapshot": SNAPSHOT,
         "artifact_hash": artifact_hash,
         "source_manifest": str((version_dir / "manifest.json").name),
+        "source_manifest_sha256": source_manifest_hash,
+        "source_provenance": {
+            "source_manifest_sha256": source_manifest_hash,
+            "dataset": source_manifest.get("dataset"),
+            "snapshot": source_manifest.get("snapshot"),
+            "license": source_manifest.get("license"),
+            "citations": source_manifest.get("citations", []),
+            "products": [
+                {
+                    "name": product.get("name"),
+                    "filename": product.get("filename"),
+                    "sha256": product.get("sha256"),
+                    "row_count": product.get("row_count"),
+                    "source_product": product.get("product"),
+                }
+                for product in source_manifest.get("products", [])
+            ],
+        },
         "threshold_policy": "pair-level-sum-across-neuropils",
         "threshold_synapses": 5,
         "threshold_applied": True,

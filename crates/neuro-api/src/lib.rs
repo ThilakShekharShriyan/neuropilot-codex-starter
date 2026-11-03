@@ -22,6 +22,23 @@ pub struct DatasetRef {
     pub snapshot: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProductProvenance {
+    pub name: String,
+    pub filename: String,
+    pub sha256: String,
+    pub row_count: usize,
+    pub source_product: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceProvenance {
+    pub source_manifest_sha256: String,
+    pub license: String,
+    pub citations: Vec<String>,
+    pub products: Vec<ProductProvenance>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Neuron {
     pub root_id: RootId,
@@ -76,6 +93,7 @@ pub struct ConnectionResponse {
     pub dataset: DatasetRef,
     pub schema_version: u32,
     pub provenance_ref: String,
+    pub provenance: SourceProvenance,
     pub nodes: Vec<Neuron>,
     pub edges: Vec<Edge>,
     pub aggregation_rule: Option<String>,
@@ -104,6 +122,7 @@ pub struct GraphService {
     schema_version: u32,
     artifact_hash: String,
     provenance_ref: String,
+    source_provenance: SourceProvenance,
     neurons: BTreeMap<RootId, Neuron>,
     pair_totals: HashMap<(RootId, RootId), u64>,
     outgoing: HashMap<RootId, Vec<Edge>>,
@@ -124,6 +143,8 @@ impl GraphService {
             dataset: String,
             snapshot: String,
             artifact_hash: String,
+            source_manifest_sha256: String,
+            source_provenance: SourceProvenance,
         }
         #[derive(Deserialize)]
         struct NormalizedNeuron {
@@ -176,7 +197,7 @@ impl GraphService {
         })
         .collect::<Result<Vec<_>, String>>()?;
         let provenance_ref = format!("manifest-sha256:{}", manifest.artifact_hash);
-        Self::new(
+        let mut service = Self::new(
             DatasetRef {
                 id: manifest.dataset,
                 snapshot: manifest.snapshot,
@@ -188,7 +209,13 @@ impl GraphService {
             edges,
             limits,
         )
-        .map_err(|error| format!("normalized artifact is invalid: {error:?}"))
+        .map_err(|error| format!("normalized artifact is invalid: {error:?}"))?;
+        if manifest.source_manifest_sha256 != manifest.source_provenance.source_manifest_sha256 {
+            return Err("normalized provenance hash is inconsistent".to_string());
+        }
+        service.source_provenance = manifest.source_provenance;
+        service.source_provenance.source_manifest_sha256 = manifest.source_manifest_sha256;
+        Ok(service)
     }
 
     pub fn neuron(&self, root_id: &str) -> Result<Neuron, QueryError> {
@@ -207,6 +234,10 @@ impl GraphService {
 
     pub fn provenance_ref(&self) -> &str {
         &self.provenance_ref
+    }
+
+    pub fn source_provenance(&self) -> &SourceProvenance {
+        &self.source_provenance
     }
 
     pub fn search_neurons(
@@ -297,6 +328,7 @@ impl GraphService {
             schema_version,
             artifact_hash,
             provenance_ref,
+            source_provenance: SourceProvenance::default(),
             neurons: neuron_map,
             pair_totals,
             outgoing,
@@ -351,6 +383,7 @@ impl GraphService {
             dataset: self.dataset.clone(),
             schema_version: self.schema_version,
             provenance_ref: self.provenance_ref.clone(),
+            provenance: self.source_provenance.clone(),
             nodes,
             edges: page,
             aggregation_rule: query
