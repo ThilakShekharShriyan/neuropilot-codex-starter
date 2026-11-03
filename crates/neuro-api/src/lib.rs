@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub mod control;
 pub mod http;
 pub mod simulation;
 

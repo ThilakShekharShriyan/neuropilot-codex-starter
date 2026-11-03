@@ -135,6 +135,7 @@ class SimulationService:
             "watchdog_timeout_ms": WATCHDOG_TIMEOUT_MS,
             "queue_capacity": CONTROL_QUEUE_CAPACITY,
             "channels": ["forward", "lateral", "turn"],
+            "actuator_count": self.simulation.control_size,
             "sequence": 0,
         }
 

@@ -4,7 +4,7 @@
 //! caller supplies an already validated, local `GraphService`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Direction, GraphService, Query as GraphQuery, QueryError,
+    control::{ControlError, ControlInput, ControlQueue},
     simulation::{GatewayError, SimulationGateway},
 };
 
@@ -25,6 +26,7 @@ use crate::{
 pub struct AppState {
     pub graph: Arc<GraphService>,
     pub simulation: Option<Arc<SimulationGateway>>,
+    pub control_queue: Arc<Mutex<ControlQueue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,7 @@ pub fn router_with_simulation(
         )
         .route("/api/v1/control/status", get(control_status))
         .route("/api/v1/control/reset", axum::routing::post(control_reset))
+        .route("/api/v1/control/input", axum::routing::post(control_input))
         .route(
             "/api/v1/simulation/reset",
             axum::routing::post(simulation_reset),
@@ -125,7 +128,11 @@ pub fn router_with_simulation(
             "/api/v1/simulation/close",
             axum::routing::post(simulation_close),
         )
-        .with_state(AppState { graph, simulation })
+        .with_state(AppState {
+            graph,
+            simulation,
+            control_queue: Arc::new(Mutex::new(ControlQueue::default())),
+        })
         .layer(middleware::from_fn(local_boundary))
 }
 
@@ -347,6 +354,39 @@ async fn control_reset(State(state): State<AppState>) -> Response {
     }
 }
 
+async fn control_input(State(state): State<AppState>, Json(input): Json<ControlInput>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    let session = match simulation.control_status().await {
+        Ok(value) => value,
+        Err(error_value) => return gateway_error(error_value),
+    };
+    let mut queue = match state.control_queue.lock() {
+        Ok(value) => value,
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "control_queue_unavailable",
+                "control queue is unavailable",
+            );
+        }
+    };
+    match queue.enqueue(
+        &input,
+        &session.control_session_id,
+        &session.status,
+        session.actuator_count,
+    ) {
+        Ok(value) => (StatusCode::ACCEPTED, Json(value)).into_response(),
+        Err(error_value) => control_error(error_value),
+    }
+}
+
 async fn simulation_metrics(State(state): State<AppState>) -> Response {
     let Some(simulation) = state.simulation else {
         return error(
@@ -517,6 +557,38 @@ fn gateway_error(error_value: GatewayError) -> axum::response::Response {
             StatusCode::BAD_GATEWAY,
             "simulation_error",
             "simulation service returned an error",
+        ),
+    }
+}
+
+fn control_error(error_value: ControlError) -> axum::response::Response {
+    match error_value {
+        ControlError::InvalidSchema
+        | ControlError::InvalidControl
+        | ControlError::InvalidSource => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_control",
+            "control is invalid",
+        ),
+        ControlError::StaleSession => error(
+            StatusCode::CONFLICT,
+            "stale_session",
+            "control session is stale",
+        ),
+        ControlError::StaleSequence => error(
+            StatusCode::CONFLICT,
+            "stale_sequence",
+            "control sequence is stale",
+        ),
+        ControlError::ControlPaused => error(
+            StatusCode::CONFLICT,
+            "control_paused",
+            "control session is not active",
+        ),
+        ControlError::QueueFull => error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "queue_dropped",
+            "control queue is full",
         ),
     }
 }

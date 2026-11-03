@@ -70,6 +70,8 @@ Contract rules:
 - The maximum vector length is the existing bounded simulator limit of 256;
   the expected active-leg actuator length is validated against the current
   Python session before the first active command.
+- The Python session advertises the observed `actuator_count`; Rust must use
+  that value for mapping and reject zero or mismatched counts.
 - Control messages never contain neuron IDs, connectome edges, anatomical
   coordinates, or claims about neural activity.
 
@@ -308,5 +310,9 @@ M4 implementation may be reviewed only after:
 
 The first implementation slice adds the Python control-session/status/reset
 payloads and Rust validation/proxy methods, with loopback failure-path tests.
-It does not yet implement active input, queueing, pause/resume, emergency stop,
-heartbeat/watchdog execution, frontend controls, or gamepad handling.
+The second slice adds Rust-side three-channel validation, explicit mapping, and
+a bounded latest-value-wins queue. The input route remains fail-safe while the
+session is `paused` and reports `control_paused`; it does not forward motion to
+Python until the separately reviewed pause/resume and watchdog slice enables an
+active session. Emergency stop, heartbeat/watchdog execution, frontend controls,
+and gamepad handling remain outstanding.

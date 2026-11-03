@@ -51,6 +51,7 @@ pub struct ControlSession {
     pub watchdog_timeout_ms: u64,
     pub queue_capacity: usize,
     pub channels: Vec<String>,
+    pub actuator_count: usize,
     pub sequence: u64,
 }
 
@@ -292,6 +293,7 @@ fn validate_control_session(value: &ControlSession) -> Result<(), GatewayError> 
         || !(0.0..=1.0).contains(&value.control_authority)
         || value.watchdog_timeout_ms == 0
         || value.queue_capacity == 0
+        || value.actuator_count == 0
         || value.channels != vec!["forward", "lateral", "turn"]
     {
         return Err(GatewayError::InvalidResponse);
@@ -321,7 +323,7 @@ mod tests {
     }
 
     fn control_body() -> &'static str {
-        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"sequence":0}"#
+        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"actuator_count":42,"sequence":0}"#
     }
 
     async fn mock_once(
