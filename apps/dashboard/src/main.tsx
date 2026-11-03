@@ -9,6 +9,7 @@ type ProductProvenance = { name: string; filename: string; sha256: string; row_c
 type SourceProvenance = { source_manifest_sha256: string; license: string; citations: string[]; products: ProductProvenance[] };
 type ConnectionResponse = { nodes: Neuron[]; edges: Edge[]; truncated: boolean; next_cursor: string | null; provenance_ref: string; provenance: SourceProvenance };
 type SearchResponse = { neurons: Neuron[]; provenance_ref: string; provenance: SourceProvenance };
+type SimulationState = { data_kind: "simulated-live"; time: number; joint_angles: number[]; joint_velocities: number[]; body_positions: number[][] };
 
 const dataset = import.meta.env.VITE_DATASET_ID ?? "flywire-fafb";
 const snapshot = import.meta.env.VITE_SNAPSHOT ?? "783";
@@ -17,6 +18,16 @@ const apiBase = import.meta.env.VITE_API_BASE ?? "";
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, { headers: { Accept: "application/json" } });
   if (!response.ok) throw new Error(`API request failed (${response.status})`);
+  return (await response.json()) as T;
+}
+
+async function postJson<T>(path: string, body: unknown = {}): Promise<T> {
+  const response = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Simulation request failed (${response.status})`);
   return (await response.json()) as T;
 }
 
@@ -122,6 +133,8 @@ function App() {
   const [matches, setMatches] = useState<Neuron[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [simulation, setSimulation] = useState<SimulationState | null>(null);
+  const [simulationStatus, setSimulationStatus] = useState<"idle" | "loading" | "closed" | "error">("idle");
 
   const loadGraph = async () => {
     if (!/^\d+$/.test(rootId)) {
@@ -156,6 +169,22 @@ function App() {
     }
   };
 
+  const simulationAction = async (action: "state" | "reset" | "step" | "close") => {
+    setSimulationStatus("loading");
+    try {
+      const result = action === "state"
+        ? await getJson<SimulationState>("/api/v1/simulation/state")
+        : action === "close"
+          ? await postJson<{ status: "closed" }>("/api/v1/simulation/close")
+          : await postJson<SimulationState>(`/api/v1/simulation/${action}`);
+      setSimulation(action === "close" ? null : result as SimulationState);
+      setSimulationStatus(action === "close" ? "closed" : "idle");
+    } catch (reason) {
+      setSimulationStatus("error");
+      setError(reason instanceof Error ? reason.message : "Simulation service unavailable.");
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar"><div><span className="eyebrow">NEUROPILOT / M1</span><h1>Connectome Explorer</h1></div><span className="badge">{dataset} · v{snapshot}</span></header>
@@ -167,6 +196,7 @@ function App() {
       {status === "loading" && <p className="notice" role="status">Loading source-backed records…</p>}
       {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
+      <section className="simulation-panel" aria-label="CPU simulation controls"><div><span className="eyebrow">M2 / SIMULATED LIVE</span><h2>NeuroMechFly CPU session</h2><p>{simulation ? `t = ${simulation.time.toFixed(4)} s · ${simulation.joint_angles.length} joint angles` : "No simulation state loaded"}</p></div><div className="simulation-actions"><button onClick={() => simulationAction("state")} disabled={simulationStatus === "loading"}>State</button><button onClick={() => simulationAction("reset")} disabled={simulationStatus === "loading"}>Reset</button><button onClick={() => simulationAction("step")} disabled={simulationStatus === "loading"}>Step</button><button onClick={() => simulationAction("close")} disabled={simulationStatus === "loading"}>Close</button></div><small>Observed state from the CPU simulator; not connectome activity or anatomical coordinates.</small></section>
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
         {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref} · source manifest {connections.provenance.source_manifest_sha256.slice(0, 12)}… · {connections.provenance.products.length} source files{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
       </section>

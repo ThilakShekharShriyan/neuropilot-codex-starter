@@ -48,3 +48,26 @@ provisioning are explicitly out of scope for this first M2 slice.
 uv sync
 PYTHONPATH=python uv run --project . pytest -q python/tests/test_sim_adapter.py
 ```
+
+## Gateway slice
+
+The Rust `SimulationGateway` validates loopback base URLs, applies a two-second
+request timeout, rejects non-finite or oversized control arrays, and maps
+Python-service failures to stable HTTP errors. The `m2_server` example exposes
+the simulation routes through Rust while retaining the M1 graph routes:
+
+```bash
+PYTHONPATH=python uv run --project . python -m neuropilot_sim.server --port 8790
+cargo run -p neuro-api --example m2_server -- data/normalized/fafb_v783 8788
+```
+
+The dashboard talks only to the Rust origin. Simulation responses carry
+`data_kind: "simulated-live"`; they are never presented as connectome activity.
+
+On the local Mac smoke run (30 sequential reset/step requests through Python →
+Rust, one physics step per request), observed round-trip latency was p50
+1.16 ms and p95 3.25 ms. This is a baseline, not a performance target.
+
+The end-to-end smoke also verified reset, step, invalid-control rejection,
+close, and post-close `409 simulation_closed` behavior. Restarting the Python
+service restores the gateway connection without restarting Rust.

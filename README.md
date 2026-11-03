@@ -49,6 +49,10 @@ Do not rewrite FlyGym or MuJoCo in Rust. Integrate the scientific simulator thro
    ```
    It exposes `/health`, `/api/v1/simulation/state`, and bounded reset/step/close
    endpoints on loopback only.
+   To run the Rust gateway in front of it:
+   ```bash
+   cargo run -p neuro-api --example m2_server -- data/normalized/fafb_v783 8788
+   ```
 5. Ask Codex to inspect the repository and propose a minimal Milestone 0 implementation:
    > Read AGENTS.md, plan.md, skills.md. Do not implement future milestones. Inspect my machine and repository, report missing prerequisites, and propose the smallest verified Milestone 0.
 6. Work milestone by milestone. Do not advance until the acceptance checklist is met.

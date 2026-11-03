@@ -16,11 +16,15 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Direction, GraphService, Query as GraphQuery, QueryError};
+use crate::{
+    Direction, GraphService, Query as GraphQuery, QueryError,
+    simulation::{GatewayError, SimulationGateway},
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub graph: Arc<GraphService>,
+    pub simulation: Option<Arc<SimulationGateway>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +81,13 @@ fn default_min_synapses() -> u64 {
 }
 
 pub fn router(graph: Arc<GraphService>) -> Router {
+    router_with_simulation(graph, None)
+}
+
+pub fn router_with_simulation(
+    graph: Arc<GraphService>,
+    simulation: Option<Arc<SimulationGateway>>,
+) -> Router {
     Router::new()
         .route(
             "/api/v1/datasets/{dataset}/{snapshot}/neurons/{root_id}",
@@ -90,7 +101,20 @@ pub fn router(graph: Arc<GraphService>) -> Router {
             "/api/v1/datasets/{dataset}/{snapshot}/neurons",
             get(search_neurons),
         )
-        .with_state(AppState { graph })
+        .route("/api/v1/simulation/state", get(simulation_state))
+        .route(
+            "/api/v1/simulation/reset",
+            axum::routing::post(simulation_reset),
+        )
+        .route(
+            "/api/v1/simulation/step",
+            axum::routing::post(simulation_step),
+        )
+        .route(
+            "/api/v1/simulation/close",
+            axum::routing::post(simulation_close),
+        )
+        .with_state(AppState { graph, simulation })
         .layer(middleware::from_fn(local_boundary))
 }
 
@@ -116,16 +140,19 @@ async fn local_boundary(request: Request<axum::body::Body>, next: Next) -> Respo
                         | "127.0.0.1:3000"
                         | "127.0.0.1:5173"
                         | "127.0.0.1:8787"
+                        | "127.0.0.1:8788"
                         | "localhost"
                         | "localhost:80"
                         | "localhost:3000"
                         | "localhost:5173"
                         | "localhost:8787"
+                        | "localhost:8788"
                         | "[::1]"
                         | "[::1]:80"
                         | "[::1]:3000"
                         | "[::1]:5173"
                         | "[::1]:8787"
+                        | "[::1]:8788"
                 )
             })
             .unwrap_or(false);
@@ -253,6 +280,69 @@ async fn search_neurons(
     }
 }
 
+async fn simulation_state(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.state().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn simulation_reset(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.reset().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn simulation_step(
+    State(state): State<AppState>,
+    Json(request): Json<crate::simulation::StepRequest>,
+) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.step(request.control).await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn simulation_close(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.close().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "closed"})),
+        )
+            .into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
 fn parse_direction(value: &str) -> Option<Direction> {
     match value {
         "incoming" => Some(Direction::Incoming),
@@ -308,6 +398,46 @@ fn query_error(error_value: QueryError) -> axum::response::Response {
         ),
     };
     error(status, code, message)
+}
+
+fn gateway_error(error_value: GatewayError) -> axum::response::Response {
+    match error_value {
+        GatewayError::InvalidControl => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_control",
+            "control is invalid",
+        ),
+        GatewayError::InvalidBaseUrl | GatewayError::InvalidResponse => error(
+            StatusCode::BAD_GATEWAY,
+            "simulation_protocol_error",
+            "simulation response is invalid",
+        ),
+        GatewayError::Timeout => error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "simulation_timeout",
+            "simulation service timed out",
+        ),
+        GatewayError::Unavailable => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation service is unavailable",
+        ),
+        GatewayError::Remote(status) if status == StatusCode::CONFLICT => error(
+            StatusCode::CONFLICT,
+            "simulation_closed",
+            "simulation is closed",
+        ),
+        GatewayError::Remote(status) if status == StatusCode::BAD_REQUEST => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_control",
+            "control is invalid",
+        ),
+        GatewayError::Remote(_) => error(
+            StatusCode::BAD_GATEWAY,
+            "simulation_error",
+            "simulation service returned an error",
+        ),
+    }
 }
 
 fn error(

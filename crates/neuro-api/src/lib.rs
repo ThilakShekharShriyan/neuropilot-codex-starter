@@ -13,6 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod http;
+pub mod simulation;
 
 pub type RootId = String;
 

@@ -23,6 +23,9 @@ input { width: 260px; border: 1px solid #344056; border-radius: 8px; padding: 10
 .matches { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; align-items: center; }
 .matches h2 { width: 100%; }
 .graph-panel { margin-top: 24px; overflow: hidden; border: 1px solid #222b3c; border-radius: 14px; background: #111722; }
+.simulation-panel { margin-top: 24px; display: grid; gap: 10px; padding: 18px 20px; border: 1px solid #3d4938; border-radius: 14px; background: #121a16; }
+.simulation-panel p, .simulation-panel small { color: #9bb39f; font-size: .82rem; }
+.simulation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .panel-heading { padding: 18px 20px; }
 .legend { display: flex; gap: 8px; align-items: center; }
 .dot { width: 9px; height: 9px; display: inline-block; border-radius: 999px; }
