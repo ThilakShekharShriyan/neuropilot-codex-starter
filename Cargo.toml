@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hello"]
+members = ["crates/hello", "crates/neuro-api"]
 
 [workspace.package]
 edition = "2024"
