@@ -104,6 +104,12 @@ pub fn router_with_simulation(
         .route("/api/v1/simulation/state", get(simulation_state))
         .route("/api/v1/simulation/metrics", get(simulation_metrics))
         .route(
+            "/api/v1/control/session",
+            axum::routing::post(control_session),
+        )
+        .route("/api/v1/control/status", get(control_status))
+        .route("/api/v1/control/reset", axum::routing::post(control_reset))
+        .route(
             "/api/v1/simulation/reset",
             axum::routing::post(simulation_reset),
         )
@@ -294,6 +300,48 @@ async fn simulation_state(State(state): State<AppState>) -> Response {
         );
     };
     match simulation.state().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn control_session(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.control_session().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn control_status(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.control_status().await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn control_reset(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    match simulation.control_reset().await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error_value) => gateway_error(error_value),
     }

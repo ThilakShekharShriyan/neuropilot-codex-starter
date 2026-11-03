@@ -15,6 +15,10 @@ from typing import Any
 from .adapter import FlySimulation, FlyState
 
 MAX_REQUEST_BYTES = 1_048_576
+CONTROL_SCHEMA_VERSION = 1
+CONTROL_AUTHORITY = 0.25
+CONTROL_QUEUE_CAPACITY = 32
+WATCHDOG_TIMEOUT_MS = 250
 
 
 def _state_payload(state: FlyState) -> dict[str, Any]:
@@ -39,6 +43,8 @@ class SimulationService:
         self.reset_count = 0
         self.request_count = 0
         self.error_count = 0
+        self.control_session_id = secrets.token_hex(16)
+        self.control_status = "paused"
 
     def _payload(self, state: FlyState) -> dict[str, Any]:
         payload = _state_payload(state)
@@ -77,6 +83,7 @@ class SimulationService:
         with self.lock:
             self.simulation.close()
             self.status = "closed"
+            self.control_status = "disconnected"
 
     def restart(self) -> dict[str, Any]:
         with self.lock:
@@ -89,7 +96,47 @@ class SimulationService:
             self.request_count = 0
             self.error_count = 0
             self.last_step_latency_ms = None
+            self.control_session_id = secrets.token_hex(16)
+            self.control_status = "paused"
             return self._payload(self.simulation.reset())
+
+    def control_session(self) -> dict[str, Any]:
+        with self.lock:
+            self.control_session_id = secrets.token_hex(16)
+            self.control_status = "paused" if self.status == "live" else "disconnected"
+            return self._control_payload()
+
+    def control_reset(self) -> dict[str, Any]:
+        with self.lock:
+            state = self.simulation.reset()
+            self.status = "live"
+            self.step_count = 0
+            self.last_step_latency_ms = None
+            self.reset_count += 1
+            self.control_session_id = secrets.token_hex(16)
+            self.control_status = "paused"
+            payload = self._control_payload()
+            payload["state"] = self._payload(state)
+            return payload
+
+    def control_status_payload(self) -> dict[str, Any]:
+        with self.lock:
+            return self._control_payload()
+
+    def _control_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": CONTROL_SCHEMA_VERSION,
+            "data_kind": "simulated-live",
+            "control_session_id": self.control_session_id,
+            "simulator_session_id": self.session_id,
+            "status": self.control_status,
+            "simulator_status": self.status,
+            "control_authority": CONTROL_AUTHORITY,
+            "watchdog_timeout_ms": WATCHDOG_TIMEOUT_MS,
+            "queue_capacity": CONTROL_QUEUE_CAPACITY,
+            "channels": ["forward", "lateral", "turn"],
+            "sequence": 0,
+        }
 
     def metrics(self) -> dict[str, Any]:
         with self.lock:
@@ -165,6 +212,9 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
             if self.path == "/api/v1/simulation/metrics":
                 self._send(200, service.metrics())
                 return
+            if self.path == "/api/v1/control/status":
+                self._send(200, service.control_status_payload())
+                return
             self._send(404, {"code": "not_found", "message": "endpoint not found"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -199,6 +249,10 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                     )
                 elif self.path == "/api/v1/simulation/restart":
                     self._send(200, service.restart())
+                elif self.path == "/api/v1/control/session":
+                    self._send(200, service.control_session())
+                elif self.path == "/api/v1/control/reset":
+                    self._send(200, service.control_reset())
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:

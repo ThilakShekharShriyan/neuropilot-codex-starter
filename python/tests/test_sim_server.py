@@ -94,6 +94,63 @@ def test_restart_creates_new_session_and_resets_metrics() -> None:
     service.close()
 
 
+def test_control_session_contract_rotates_on_session_and_reset() -> None:
+    service = SimulationService(FlySimulation())
+    first = service.control_status_payload()
+    assert first["schema_version"] == 1
+    assert first["status"] == "paused"
+    assert first["simulator_status"] == "live"
+    assert first["channels"] == ["forward", "lateral", "turn"]
+    assert first["control_authority"] == 0.25
+    created = service.control_session()
+    assert created["control_session_id"] != first["control_session_id"]
+    reset = service.control_reset()
+    assert reset["control_session_id"] != created["control_session_id"]
+    assert reset["simulator_session_id"] == created["simulator_session_id"]
+    assert reset["status"] == "paused"
+    assert reset["state"]["step_count"] == 0
+    service.close()
+
+
+def test_control_status_reports_disconnect_after_close() -> None:
+    service = SimulationService(FlySimulation())
+    service.close()
+    status = service.control_status_payload()
+    assert status["status"] == "disconnected"
+    assert status["simulator_status"] == "closed"
+
+
+def test_control_http_session_and_status_endpoints() -> None:
+    service = SimulationService(FlySimulation())
+    server = make_server(service, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{base}/api/v1/control/status") as response:
+            status = json.loads(response.read())
+        assert status["schema_version"] == 1
+        assert status["status"] == "paused"
+        request = urllib.request.Request(
+            f"{base}/api/v1/control/session", data=b"{}", method="POST"
+        )
+        with urllib.request.urlopen(request) as response:
+            created = json.loads(response.read())
+        assert created["control_session_id"] != status["control_session_id"]
+        assert created["simulator_session_id"] == status["simulator_session_id"]
+        reset_request = urllib.request.Request(
+            f"{base}/api/v1/control/reset", data=b"{}", method="POST"
+        )
+        with urllib.request.urlopen(reset_request) as response:
+            reset = json.loads(response.read())
+        assert reset["control_session_id"] != created["control_session_id"]
+        assert reset["state"]["step_count"] == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        service.close()
+
+
 def test_concurrent_requests_count_without_lost_increments() -> None:
     service = SimulationService(FlySimulation())
     server = make_server(service, 0)

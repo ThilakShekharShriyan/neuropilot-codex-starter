@@ -1,7 +1,6 @@
 # M4 closed-loop interaction architecture
 
-Status: design and review only. No M4 control implementation is authorized by
-this document.
+Status: first typed contract slice implemented; full M4 remains under review.
 
 ## Scope and scientific boundary
 
@@ -307,5 +306,7 @@ M4 implementation may be reviewed only after:
 - Decide whether browser-issued timestamps are retained only in memory or in a
   bounded JSONL session log. If persisted, record privacy scope and retention.
 
-No M4 code, dependency, simulator behavior, or UI control is implemented by
-this design document.
+The first implementation slice adds the Python control-session/status/reset
+payloads and Rust validation/proxy methods, with loopback failure-path tests.
+It does not yet implement active input, queueing, pause/resume, emergency stop,
+heartbeat/watchdog execution, frontend controls, or gamepad handling.

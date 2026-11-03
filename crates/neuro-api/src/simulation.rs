@@ -7,6 +7,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_CONTROL_VALUES: usize = 256;
+pub const CONTROL_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SimulationState {
@@ -36,6 +37,21 @@ pub struct SimulationMetrics {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StepRequest {
     pub control: Option<Vec<f64>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ControlSession {
+    pub schema_version: u32,
+    pub data_kind: String,
+    pub control_session_id: String,
+    pub simulator_session_id: String,
+    pub status: String,
+    pub simulator_status: String,
+    pub control_authority: f64,
+    pub watchdog_timeout_ms: u64,
+    pub queue_capacity: usize,
+    pub channels: Vec<String>,
+    pub sequence: u64,
 }
 
 #[derive(Debug)]
@@ -165,6 +181,53 @@ impl SimulationGateway {
         }
     }
 
+    pub async fn control_session(&self) -> Result<ControlSession, GatewayError> {
+        let response = self
+            .client
+            .post(self.url("/api/v1/control/session"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        self.decode_control_session(response).await
+    }
+
+    pub async fn control_status(&self) -> Result<ControlSession, GatewayError> {
+        let response = self
+            .client
+            .get(self.url("/api/v1/control/status"))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        self.decode_control_session(response).await
+    }
+
+    pub async fn control_reset(&self) -> Result<ControlSession, GatewayError> {
+        let response = self
+            .client
+            .post(self.url("/api/v1/control/reset"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        self.decode_control_session(response).await
+    }
+
+    async fn decode_control_session(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<ControlSession, GatewayError> {
+        if !response.status().is_success() {
+            return Err(GatewayError::Remote(response.status()));
+        }
+        let value = response
+            .json::<ControlSession>()
+            .await
+            .map_err(|_| GatewayError::InvalidResponse)?;
+        validate_control_session(&value)?;
+        Ok(value)
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -215,6 +278,27 @@ fn validate_state(state: &SimulationState) -> Result<(), GatewayError> {
     Ok(())
 }
 
+fn validate_control_session(value: &ControlSession) -> Result<(), GatewayError> {
+    if value.schema_version != CONTROL_SCHEMA_VERSION
+        || value.data_kind != "simulated-live"
+        || value.control_session_id.is_empty()
+        || value.simulator_session_id.is_empty()
+        || !matches!(
+            value.status.as_str(),
+            "paused" | "active" | "stopped" | "disconnected"
+        )
+        || !matches!(value.simulator_status.as_str(), "live" | "closed")
+        || !value.control_authority.is_finite()
+        || !(0.0..=1.0).contains(&value.control_authority)
+        || value.watchdog_timeout_ms == 0
+        || value.queue_capacity == 0
+        || value.channels != vec!["forward", "lateral", "turn"]
+    {
+        return Err(GatewayError::InvalidResponse);
+    }
+    Ok(())
+}
+
 fn map_transport_error(error: reqwest::Error) -> GatewayError {
     if error.is_timeout() {
         GatewayError::Timeout
@@ -234,6 +318,10 @@ mod tests {
 
     fn valid_body() -> &'static str {
         r#"{"data_kind":"simulated-live","session_id":"test-session","status":"live","step_count":1,"step_latency_ms":0.2,"time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#
+    }
+
+    fn control_body() -> &'static str {
+        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"sequence":0}"#
     }
 
     async fn mock_once(
@@ -312,6 +400,32 @@ mod tests {
                 .unwrap();
         assert!(matches!(
             gateway.state().await,
+            Err(GatewayError::InvalidResponse)
+        ));
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn control_session_contract_is_validated() {
+        let (port, task) = mock_once(200, control_body(), Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        let session = gateway.control_session().await.unwrap();
+        assert_eq!(session.control_session_id, "control-session");
+        assert_eq!(session.simulator_session_id, "simulator-session");
+        assert_eq!(session.status, "paused");
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn malformed_control_session_is_rejected() {
+        let (port, task) = mock_once(200, "{}", Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert!(matches!(
+            gateway.control_status().await,
             Err(GatewayError::InvalidResponse)
         ));
         let _ = task.await;
