@@ -87,6 +87,12 @@ mismatch is an `invalid_control` failure, not an opportunity to pad or truncate
 silently. Keyboard keys and gamepad axes produce the same three-channel
 contract.
 
+The keyboard implementation treats simultaneous keys as additive bounded
+channel values: releasing one key preserves any other held key on the same or a
+different channel. Browser focus loss clears the held-key set and sends one
+neutral command. This is a UI safety behavior, not a simulator or biological
+control claim.
+
 ### Session identity and reset semantics
 
 M4 uses two distinct opaque identifiers:

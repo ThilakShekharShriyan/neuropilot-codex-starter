@@ -197,7 +197,16 @@ function App() {
 
   useEffect(() => {
     const keyMap: Record<string, keyof ControlChannels> = { ArrowUp: "forward", w: "forward", ArrowDown: "forward", s: "forward", ArrowLeft: "turn", a: "turn", ArrowRight: "turn", d: "turn", q: "lateral", e: "lateral" };
+    const negativeKeys = new Set(["ArrowDown", "s", "ArrowLeft", "a", "q"]);
     const pressed = new Set<string>();
+    const channelsForPressed = (): ControlChannels => {
+      const next: ControlChannels = { forward: 0, lateral: 0, turn: 0 };
+      pressed.forEach((key) => {
+        const channel = keyMap[key];
+        if (channel) next[channel] = Math.max(-1, Math.min(1, next[channel] + (negativeKeys.has(key) ? -1 : 1)));
+      });
+      return next;
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "BUTTON"].includes(event.target.tagName)) return;
       const channel = keyMap[event.key];
@@ -205,23 +214,27 @@ function App() {
       event.preventDefault();
       if (pressed.has(event.key)) return;
       pressed.add(event.key);
-      const direction = ["ArrowDown", "s", "ArrowLeft", "a", "q"].includes(event.key) ? -1 : 1;
-      const next = { ...controlChannelsRef.current, [channel]: direction * 1 };
-      void sendControlRef.current(next, "active");
+      void sendControlRef.current(channelsForPressed(), "active");
     };
     const onKeyUp = (event: KeyboardEvent) => {
       const channel = keyMap[event.key];
       if (!channel) return;
       pressed.delete(event.key);
       if (controlStatusRef.current !== "active") return;
-      const next = { ...controlChannelsRef.current, [channel]: 0 };
-      void sendControlRef.current(next, "neutral");
+      const next = channelsForPressed();
+      void sendControlRef.current(next, next.forward === 0 && next.lateral === 0 && next.turn === 0 ? "neutral" : "active");
+    };
+    const onBlur = () => {
+      pressed.clear();
+      if (controlStatusRef.current === "active") void sendControlRef.current({ forward: 0, lateral: 0, turn: 0 }, "neutral");
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
     };
   }, []);
 
