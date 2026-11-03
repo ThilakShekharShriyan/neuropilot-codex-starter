@@ -190,6 +190,26 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (!simulation || simulationStatus === "closed") return undefined;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const latest = await getJson<SimulationState>("/api/v1/simulation/state");
+        if (!cancelled) {
+          setSimulation(latest);
+          setSimulationStatus("idle");
+        }
+      } catch {
+        if (!cancelled) setSimulationStatus("error");
+      }
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [simulation?.session_id, simulationStatus]);
+
   return (
     <main className="app-shell">
       <header className="topbar"><div><span className="eyebrow">NEUROPILOT / M1</span><h1>Connectome Explorer</h1></div><span className="badge">{dataset} · v{snapshot}</span></header>

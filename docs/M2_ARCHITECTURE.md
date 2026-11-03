@@ -66,6 +66,9 @@ The dashboard talks only to the Rust origin. Simulation responses carry
 `GET /api/v1/simulation/metrics` exposes bounded request, error, reset, step,
 and last-latency counters for the current session. Counters are telemetry, not
 scientific measurements, and reset with a new Python service session.
+When a live session is loaded, the dashboard polls state through Rust every five
+seconds. A failed poll enters a degraded/disconnected state without running
+simulation work in the render loop; a later successful poll clears it.
 
 On the local Mac smoke run (30 sequential reset/step requests through Python →
 Rust, one physics step per request), observed round-trip latency was p50
