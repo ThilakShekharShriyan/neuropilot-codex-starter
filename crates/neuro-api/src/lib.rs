@@ -7,21 +7,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Serialize};
+
+pub mod http;
+
 pub type RootId = String;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DatasetRef {
     pub id: String,
     pub snapshot: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Neuron {
     pub root_id: RootId,
     pub primary_type: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub pre_root_id: RootId,
     pub post_root_id: RootId,
@@ -64,7 +68,7 @@ pub struct ServiceLimits {
     pub graph_cap: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionResponse {
     pub dataset: DatasetRef,
     pub schema_version: u32,
@@ -106,6 +110,24 @@ pub struct GraphService {
 }
 
 impl GraphService {
+    pub fn neuron(&self, root_id: &str) -> Result<Neuron, QueryError> {
+        if !is_ascii_root_id(root_id) {
+            return Err(QueryError::InvalidRootId);
+        }
+        self.neurons
+            .get(root_id)
+            .cloned()
+            .ok_or(QueryError::UnknownNeuron)
+    }
+
+    pub fn dataset(&self) -> &DatasetRef {
+        &self.dataset
+    }
+
+    pub fn provenance_ref(&self) -> &str {
+        &self.provenance_ref
+    }
+
     pub fn new(
         dataset: DatasetRef,
         schema_version: u32,

@@ -63,7 +63,7 @@ The manifest is exposed as metadata with `dataset_id`, `snapshot`, snapshot date
 
 All endpoints are loopback-only and JSON over HTTP for M1. The API version is `/api/v1`. The Rust listener binds to `127.0.0.1`; IPv6 is disabled unless explicitly configured and tested as `::1`. CORS allows only the exact local dashboard origin, never `*`. Host and Origin headers are validated for local requests. Errors and metadata never include absolute local paths.
 
-The current Rust crate implements the transport-neutral query contract only. The HTTP listener, neuron lookup route, narrow search route, loopback host/origin checks, exact-origin CORS, and stable HTTP error envelope remain explicit follow-up work after this contract review; no HTTP dependency is introduced at this stage.
+The Rust crate now includes a dependency-light Axum JSON router for neuron lookup and directed connection expansion over an already validated `GraphService`. The router does not acquire data, read credentials, or load arbitrary paths. It returns stable, redacted error envelopes and preserves the typed query semantics. A runnable listener, normalized-artifact loader, narrow search route, loopback host/origin checks, and exact-origin CORS remain explicit follow-up work; the router is transport code only and must not be mistaken for a complete real-data service.
 
 ### Get one neuron
 
