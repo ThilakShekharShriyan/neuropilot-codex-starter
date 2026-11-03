@@ -251,4 +251,28 @@ mod tests {
             Err(ControlError::ControlPaused)
         ));
     }
+
+    #[test]
+    fn slow_consumer_burst_stays_bounded_and_coalesces_without_overflow_drop() {
+        let mut queue = ControlQueue::new(4);
+        let mut max_depth = 0;
+
+        // The consumer intentionally drains only after each burst, modelling a
+        // slower simulator step while the input producer continues to publish.
+        for sequence in 1..=64 {
+            let ack = queue
+                .enqueue(&input(sequence), "control", "active", 2)
+                .unwrap();
+            max_depth = max_depth.max(ack.queue_depth);
+            if sequence % 16 == 0 && sequence < 64 {
+                assert_eq!(queue.pop_latest().unwrap().0, sequence);
+            }
+        }
+
+        assert_eq!(max_depth, 1);
+        assert_eq!(queue.coalesced_events(), 60);
+        assert_eq!(queue.dropped_events, 0);
+        assert_eq!(queue.pop_latest().unwrap().0, 64);
+        assert!(queue.pop_latest().is_none());
+    }
 }

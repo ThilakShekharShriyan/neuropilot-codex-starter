@@ -74,12 +74,19 @@ make check
 Latest verified result:
 
 - Python: 89 tests passed
-- Rust: 26 tests passed
+- Rust: 27 tests passed
 - Ruff, formatting, Clippy: passed
 - Frontend typecheck/build: passed
 - Git worktree clean
 
 The frontend build continues to emit the existing non-fatal bundle-size warning.
+
+The slow-consumer burst regression test publishes 64 inputs to a queue with
+capacity 4 while draining only every 16 inputs. The latest-value policy kept
+the maximum depth at 1, coalesced 60 inputs, and recorded 0 overflow drops;
+the final queued sequence was 64. This is the intended bounded backpressure
+behavior for the current control path, not evidence that an unbounded producer
+is safe.
 
 ## Acceptance checklist
 
@@ -94,8 +101,9 @@ The frontend build continues to emit the existing non-fatal bundle-size warning.
 - [x] Control latency, queue depth, accepted/rejected/drop counters exposed
 - [x] Local loopback smoke measurement recorded
 - [x] No connectome-control or biological-causality claims
-- [ ] Broader burst/drop saturation test with a deliberately slow consumer
+- [x] Burst/drop saturation test with a deliberately slow consumer; coalescing
+  prevented overflow and the observed dropped-event count was zero
 - [ ] Final user review of M4 acceptance
 
-M4 remains incomplete until the remaining burst/drop evidence is collected and
-the user approves this acceptance document. M5 remains gated.
+M4 remains incomplete until the user approves this acceptance document. M5
+remains gated.
