@@ -126,11 +126,35 @@ impl SimulationGateway {
         if !response.status().is_success() {
             return Err(GatewayError::Remote(response.status()));
         }
-        response
+        let state = response
             .json::<SimulationState>()
             .await
-            .map_err(|_| GatewayError::InvalidResponse)
+            .map_err(|_| GatewayError::InvalidResponse)?;
+        validate_state(&state)?;
+        Ok(state)
     }
+}
+
+fn validate_state(state: &SimulationState) -> Result<(), GatewayError> {
+    if state.data_kind != "simulated-live"
+        || !state.time.is_finite()
+        || state.time < 0.0
+        || state.joint_angles.len() > 10_000
+        || state.joint_velocities.len() > 10_000
+        || state.body_positions.len() > 10_000
+        || state
+            .joint_angles
+            .iter()
+            .chain(state.joint_velocities.iter())
+            .any(|value| !value.is_finite())
+        || state
+            .body_positions
+            .iter()
+            .any(|position| position.len() != 3 || position.iter().any(|value| !value.is_finite()))
+    {
+        return Err(GatewayError::InvalidResponse);
+    }
+    Ok(())
 }
 
 fn map_transport_error(error: reqwest::Error) -> GatewayError {
@@ -138,5 +162,149 @@ fn map_transport_error(error: reqwest::Error) -> GatewayError {
         GatewayError::Timeout
     } else {
         GatewayError::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{GatewayError, SimulationGateway};
+
+    fn valid_body() -> &'static str {
+        r#"{"data_kind":"simulated-live","time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#
+    }
+
+    async fn mock_once(
+        status: u16,
+        body: &'static str,
+        delay: Duration,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let reason = if status == 200 { "OK" } else { "Conflict" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn timeout_is_mapped() {
+        let (port, task) = mock_once(200, valid_body(), Duration::from_millis(100)).await;
+        let gateway = SimulationGateway::new(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert!(matches!(gateway.state().await, Err(GatewayError::Timeout)));
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn connection_refusal_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let gateway = SimulationGateway::new(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert!(matches!(
+            gateway.state().await,
+            Err(GatewayError::Unavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_state_is_rejected() {
+        let (port, task) = mock_once(200, "{}", Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert!(matches!(
+            gateway.state().await,
+            Err(GatewayError::InvalidResponse)
+        ));
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn wrong_data_kind_is_rejected() {
+        let body = r#"{"data_kind":"observed","time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#;
+        let (port, task) = mock_once(200, body, Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert!(matches!(
+            gateway.state().await,
+            Err(GatewayError::InvalidResponse)
+        ));
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn remote_closed_state_is_mapped() {
+        let (port, task) = mock_once(409, "{\"code\":\"simulation_closed\"}", Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert!(
+            matches!(gateway.state().await, Err(GatewayError::Remote(status)) if status == reqwest::StatusCode::CONFLICT)
+        );
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn invalid_control_is_rejected_before_network() {
+        let gateway = SimulationGateway::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            gateway.step(Some(vec![f64::NAN])).await,
+            Err(GatewayError::InvalidControl)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gateway_can_reconnect_after_service_restart() {
+        let (port, first) = mock_once(200, valid_body(), Duration::ZERO).await;
+        let gateway =
+            SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))
+                .unwrap();
+        assert!(gateway.state().await.is_ok());
+        let _ = first.await;
+        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let restarted = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let body = valid_body();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        assert!(gateway.state().await.is_ok());
+        let _ = restarted.await;
     }
 }

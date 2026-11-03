@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -95,7 +96,13 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                     control = body.get("control")
                     if control is not None and (
                         not isinstance(control, list)
-                        or not all(isinstance(value, (int, float)) for value in control)
+                        or len(control) > 256
+                        or not all(
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(float(value))
+                            for value in control
+                        )
                     ):
                         raise ValueError("control must be a numeric array")
                     self._send(200, service.step(control))
