@@ -60,6 +60,8 @@ pub struct ControlSession {
     #[serde(default)]
     pub pause_count: u64,
     #[serde(default)]
+    pub reset_count: u64,
+    #[serde(default)]
     pub resume_count: u64,
     #[serde(default)]
     pub neutralization_count: u64,
@@ -457,7 +459,7 @@ mod tests {
     }
 
     fn control_body() -> &'static str {
-        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"actuator_count":42,"sequence":0,"watchdog_trips":0,"stop_count":0,"pause_count":0,"resume_count":0,"neutralization_count":0,"last_control_sequence":0,"last_control_latency_ms":null}"#
+        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"actuator_count":42,"sequence":0,"watchdog_trips":0,"stop_count":0,"pause_count":0,"reset_count":0,"resume_count":0,"neutralization_count":0,"last_control_sequence":0,"last_control_latency_ms":null}"#
     }
 
     async fn mock_once(

@@ -38,6 +38,23 @@ pub struct ControlAck {
     pub sequence: u64,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ControlCounters {
+    pub accepted_events: u64,
+    pub coalesced_events: u64,
+    pub dropped_events: u64,
+    pub rejected_events: u64,
+    pub queue_depth: usize,
+    pub max_queue_depth: usize,
+    pub last_input_latency_ms: Option<f64>,
+}
+
+impl ControlCounters {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlError {
     InvalidSchema,

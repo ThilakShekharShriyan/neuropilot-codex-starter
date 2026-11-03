@@ -256,6 +256,7 @@ class SimulationService:
             "watchdog_trips": self.watchdog_trips,
             "stop_count": self.stop_count,
             "pause_count": self.pause_count,
+            "reset_count": self.reset_count,
             "resume_count": self.resume_count,
             "neutralization_count": self.neutralization_count,
             "last_control_sequence": self.last_control_sequence,

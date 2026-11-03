@@ -206,6 +206,22 @@ def test_idle_gamepad_zero_input_does_not_refresh_watchdog() -> None:
     service.close()
 
 
+def test_restart_invalidates_previous_control_session() -> None:
+    service = SimulationService(FlySimulation())
+    previous = service.control_session()["control_session_id"]
+    service.restart()
+    restarted = service.control_status_payload()
+    assert restarted["control_session_id"] != previous
+    assert restarted["status"] == "paused"
+    try:
+        service.control_resume(previous)
+    except ValueError as error:
+        assert "stale" in str(error)
+    else:
+        raise AssertionError("stale control session was accepted after restart")
+    service.close()
+
+
 def test_control_watchdog_neutralizes_and_stops() -> None:
     service = SimulationService(FlySimulation())
     control_id = service.control_session()["control_session_id"]

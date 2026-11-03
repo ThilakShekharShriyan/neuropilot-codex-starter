@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::{
     Json, Router,
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Direction, GraphService, Query as GraphQuery, QueryError,
-    control::{ControlError, ControlInput, ControlQueue},
+    control::{ControlCounters, ControlError, ControlInput, ControlQueue},
     simulation::{GatewayError, SimulationGateway},
 };
 
@@ -27,6 +28,7 @@ pub struct AppState {
     pub graph: Arc<GraphService>,
     pub simulation: Option<Arc<SimulationGateway>>,
     pub control_queue: Arc<Mutex<ControlQueue>>,
+    pub control_counters: Arc<Mutex<ControlCounters>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +117,7 @@ pub fn router_with_simulation(
             axum::routing::post(control_session),
         )
         .route("/api/v1/control/status", get(control_status))
+        .route("/api/v1/control/metrics", get(control_metrics))
         .route("/api/v1/control/reset", axum::routing::post(control_reset))
         .route("/api/v1/control/input", axum::routing::post(control_input))
         .route(
@@ -147,6 +150,7 @@ pub fn router_with_simulation(
             graph,
             simulation,
             control_queue: Arc::new(Mutex::new(ControlQueue::default())),
+            control_counters: Arc::new(Mutex::new(ControlCounters::default())),
         })
         .layer(middleware::from_fn(local_boundary))
 }
@@ -355,6 +359,60 @@ async fn control_status(State(state): State<AppState>) -> Response {
     }
 }
 
+async fn control_metrics(State(state): State<AppState>) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    let session = match simulation.control_status().await {
+        Ok(value) => value,
+        Err(error_value) => return gateway_error(error_value),
+    };
+    let counters = match state.control_counters.lock() {
+        Ok(value) => value.clone(),
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "control_metrics_unavailable",
+                "control telemetry is unavailable",
+            );
+        }
+    };
+    let mut payload = match serde_json::to_value(counters) {
+        Ok(value) => value,
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "control_metrics_unavailable",
+                "control telemetry is unavailable",
+            );
+        }
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("schema_version".into(), serde_json::json!(1));
+        object.insert("data_kind".into(), serde_json::json!("simulated-live"));
+        object.insert(
+            "control_session_id".into(),
+            serde_json::json!(session.control_session_id),
+        );
+        object.insert(
+            "simulator_session_id".into(),
+            serde_json::json!(session.simulator_session_id),
+        );
+        object.insert("status".into(), serde_json::json!(session.status));
+        object.insert(
+            "watchdog_trips".into(),
+            serde_json::json!(session.watchdog_trips),
+        );
+        object.insert("stop_count".into(), serde_json::json!(session.stop_count));
+        object.insert("reset_count".into(), serde_json::json!(session.reset_count));
+    }
+    (StatusCode::OK, Json(payload)).into_response()
+}
+
 async fn control_reset(State(state): State<AppState>) -> Response {
     let Some(simulation) = state.simulation else {
         return error(
@@ -367,6 +425,9 @@ async fn control_reset(State(state): State<AppState>) -> Response {
         Ok(value) => {
             if let Ok(mut queue) = state.control_queue.lock() {
                 queue.reset();
+            }
+            if let Ok(mut counters) = state.control_counters.lock() {
+                counters.reset();
             }
             (StatusCode::OK, Json(value)).into_response()
         }
@@ -424,6 +485,7 @@ async fn control_lifecycle(state: AppState, control_session_id: String, action: 
 }
 
 async fn control_input(State(state): State<AppState>, Json(input): Json<ControlInput>) -> Response {
+    let started = Instant::now();
     let Some(simulation) = state.simulation else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -453,7 +515,12 @@ async fn control_input(State(state): State<AppState>, Json(input): Json<ControlI
             session.actuator_count,
         ) {
             Ok(value) => value,
-            Err(error_value) => return control_error(error_value),
+            Err(error_value) => {
+                if let Ok(mut counters) = state.control_counters.lock() {
+                    counters.rejected_events += 1;
+                }
+                return control_error(error_value);
+            }
         };
         let Some((_, values, mode)) = queue.pop_latest() else {
             return error(
@@ -477,9 +544,24 @@ async fn control_input(State(state): State<AppState>, Json(input): Json<ControlI
         Ok(_) => {
             let mut ack = ack;
             ack.forwarded = true;
+            if let Ok(mut counters) = state.control_counters.lock() {
+                counters.accepted_events += 1;
+                if ack.coalesced {
+                    counters.coalesced_events += 1;
+                }
+                counters.queue_depth = 0;
+                counters.dropped_events = ack.dropped_events;
+                counters.max_queue_depth = counters.max_queue_depth.max(ack.queue_depth);
+                counters.last_input_latency_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+            }
             (StatusCode::ACCEPTED, Json(ack)).into_response()
         }
-        Err(error_value) => gateway_error(error_value),
+        Err(error_value) => {
+            if let Ok(mut counters) = state.control_counters.lock() {
+                counters.rejected_events += 1;
+            }
+            gateway_error(error_value)
+        }
     }
 }
 
