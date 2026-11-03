@@ -277,12 +277,19 @@ class CodexAcquirer:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def discover_inventory(self) -> tuple[str, ...]:
-        """Fail closed because Codex documents no authenticated inventory API."""
-        raise AcquisitionError(
-            "Codex has no supported authenticated product-inventory mechanism; "
-            "refusing to scrape the sign-in portal or guess product identifiers"
-        )
+    def discover_inventory(self, *, approved_contract: bool = False) -> tuple[str, ...]:
+        """Return only the explicitly reviewed product contract.
+
+        Codex does not document an authenticated inventory endpoint. The
+        default remains fail-closed; proceeding requires explicit human
+        approval of the reviewed four-product contract.
+        """
+        if not approved_contract:
+            raise AcquisitionError(
+                "Codex has no supported authenticated product-inventory mechanism; "
+                "refusing to scrape the sign-in portal or guess product identifiers"
+            )
+        return PRODUCTS
 
     def _backoff_seconds(self, attempt: int) -> float:
         base = self._config.retry_backoff_seconds * (2**attempt)
@@ -432,6 +439,11 @@ class CodexAcquirer:
                 "license": LICENSE,
                 "citations": list(CITATIONS),
                 "importer_commit": self._config.importer_commit,
+                "inventory": {
+                    "source": "human-approved-reviewed-contract",
+                    "portal_enumerated": False,
+                    "products": list(PRODUCTS),
+                },
                 "validation": {
                     "valid": report.valid,
                     "source_rows_below_five": report.products[
@@ -456,6 +468,14 @@ class CodexAcquirer:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Acquire approved FlyWire FAFB v783 products")
     parser.add_argument("--output-dir", type=Path, default=Path("data/raw/fafb_v783"))
+    parser.add_argument(
+        "--approved-reviewed-contract",
+        action="store_true",
+        help=(
+            "proceed with the human-approved four-product contract when "
+            "Codex inventory is unavailable"
+        ),
+    )
     args = parser.parse_args(argv)
     token = os.environ.get("CODEX_API_TOKEN")
     if not token:
@@ -467,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             importer_commit=_current_importer_commit(),
         )
         with CodexAcquirer(token, config) as acquirer:
-            acquirer.discover_inventory()
+            acquirer.discover_inventory(approved_contract=args.approved_reviewed_contract)
             observations = acquirer.acquire_all()
         print(json.dumps([observation.__dict__ for observation in observations], sort_keys=True))
         return 0

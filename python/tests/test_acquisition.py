@@ -283,6 +283,11 @@ def test_inventory_discovery_fails_closed_without_supported_mechanism(tmp_path: 
             acquirer.discover_inventory()
 
 
+def test_human_approved_contract_is_explicitly_reviewed(tmp_path: Path) -> None:
+    with CodexAcquirer("secret-token", _config(tmp_path)) as acquirer:
+        assert acquirer.discover_inventory(approved_contract=True) == PRODUCTS
+
+
 def test_acquire_all_writes_token_free_manifest_and_all_products(tmp_path: Path) -> None:
     bundle = synthetic_bundle()
 
