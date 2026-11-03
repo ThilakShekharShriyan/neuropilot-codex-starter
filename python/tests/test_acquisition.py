@@ -6,12 +6,14 @@ import traceback
 from pathlib import Path
 
 import httpx
+import neuropilot_core.acquisition as acquisition
 import pytest
 from neuropilot_core.acquisition import (
     PRODUCTS,
     AcquisitionConfig,
     AcquisitionError,
     CodexAcquirer,
+    _publish_staged,
     manifest_bytes,
     redact,
 )
@@ -122,7 +124,7 @@ def test_transient_5xx_is_bounded(tmp_path: Path) -> None:
     assert calls == 3
 
 
-def test_timeout_cleans_partial_file(tmp_path: Path) -> None:
+def test_timeout_cleans_partial_file(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("secret-token in an unsafe exception", request=request)
 
@@ -131,12 +133,22 @@ def test_timeout_cleans_partial_file(tmp_path: Path) -> None:
     ) as acquirer:
         with pytest.raises(AcquisitionError, match="timed out") as failure:
             acquirer.download_product("neurons")
+    formatted = "".join(
+        traceback.format_exception(failure.type, failure.value, failure.tb)
+    )
     assert "secret-token" not in str(failure.value)
-    assert "api_token=" not in traceback.format_exc()
+    assert "secret-token" not in formatted
+    assert "api_token=" not in formatted
+    assert failure.value.__cause__ is None
+    assert failure.value.__suppress_context__
+    assert "secret-token" not in caplog.text
+    assert "api_token=" not in caplog.text
     assert not list(tmp_path.iterdir())
 
 
-def test_connection_failure_traceback_is_credential_free(tmp_path: Path) -> None:
+def test_connection_failure_traceback_is_credential_free(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(
             "failed https://codex.flywire.ai/api/download_resource?api_token=secret-token",
@@ -146,11 +158,33 @@ def test_connection_failure_traceback_is_credential_free(tmp_path: Path) -> None
     with CodexAcquirer(
         "secret-token", _config(tmp_path, max_retries=1), client=_client(handler)
     ) as acquirer:
-        with pytest.raises(AcquisitionError, match="network request failed"):
+        with pytest.raises(AcquisitionError, match="network request failed") as failure:
             acquirer.download_product("neurons")
-        formatted = traceback.format_exc()
+    formatted = "".join(traceback.format_exception(failure.type, failure.value, failure.tb))
     assert "secret-token" not in formatted
     assert "api_token=" not in formatted
+    assert failure.value.__cause__ is None
+    assert failure.value.__suppress_context__
+    assert "secret-token" not in caplog.text
+    assert "api_token=" not in caplog.text
+
+
+def test_retry_exhaustion_traceback_and_logs_are_credential_free(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path, max_retries=1), client=_client(handler)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="transient HTTP 503") as failure:
+            acquirer.download_product("neurons")
+    formatted = "".join(traceback.format_exception(failure.type, failure.value, failure.tb))
+    assert "secret-token" not in formatted
+    assert "api_token=" not in formatted
+    assert "secret-token" not in caplog.text
+    assert "api_token=" not in caplog.text
 
 
 def test_interrupted_transfer_cleans_partial_file(tmp_path: Path) -> None:
@@ -338,6 +372,44 @@ def test_manifest_write_failure_preserves_preexisting_output(
             acquirer.acquire_all()
     assert existing.read_bytes() == b"previous-valid-output"
     assert not list(tmp_path.glob(".fafb-v783-staging-*"))
+
+
+def test_publication_failure_rolls_back_complete_previous_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "fafb_v783"
+    staging = tmp_path / ".fafb-v783-staging-test"
+    output.mkdir()
+    staging.mkdir()
+    previous = {
+        "neurons.csv.gz": b"old-neurons",
+        "classification.csv.gz": b"old-classification",
+        "consolidated_cell_types.csv.gz": b"old-types",
+        "connections_princeton.csv.gz": b"old-connections",
+        "manifest.json": b"old-manifest",
+    }
+    replacement = {
+        name: value.replace(b"old-", b"new-") for name, value in previous.items()
+    }
+    for name, value in previous.items():
+        (output / name).write_bytes(value)
+    for name, value in replacement.items():
+        (staging / name).write_bytes(value)
+
+    original_rename = acquisition._rename_path
+
+    def fail_new_directory(source: Path, destination: Path) -> None:
+        if source == staging:
+            raise OSError("injected publication failure")
+        original_rename(source, destination)
+
+    monkeypatch.setattr("neuropilot_core.acquisition._rename_path", fail_new_directory)
+    with pytest.raises(OSError, match="injected publication failure"):
+        _publish_staged(staging, output)
+
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == previous
+    assert {path.name: path.read_bytes() for path in staging.iterdir()} == replacement
+    assert not list(tmp_path.glob(".fafb_v783.previous-*"))
 
 
 def test_manifest_serialization_is_deterministic_and_token_free() -> None:

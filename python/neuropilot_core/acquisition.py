@@ -12,9 +12,11 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +51,7 @@ CITATIONS = (
 DEFAULT_MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 TOKEN_PATTERN = re.compile(r"(?i)(api_token=)[^&\s]+")
+LOGGER = logging.getLogger(__name__)
 
 
 class AcquisitionError(RuntimeError):
@@ -140,6 +143,33 @@ def _atomic_write_bytes(destination: Path, payload: bytes) -> None:
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _rename_path(source: Path, destination: Path) -> None:
+    source.rename(destination)
+
+
+def _publish_staged(staging: Path, output_dir: Path) -> None:
+    """Swap a complete staged directory into place, rolling back on failure."""
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    backup: Path | None = None
+    old_moved = False
+    try:
+        if output_dir.exists():
+            backup = Path(
+                tempfile.mkdtemp(prefix=f".{output_dir.name}.previous-", dir=output_dir.parent)
+            )
+            backup.rmdir()
+            _rename_path(output_dir, backup)
+            old_moved = True
+        _rename_path(staging, output_dir)
+    except BaseException:
+        if old_moved and backup is not None and not output_dir.exists():
+            _rename_path(backup, output_dir)
+        raise
+    else:
+        if backup is not None:
+            shutil.rmtree(backup)
 
 
 def manifest_bytes(manifest: dict[str, object]) -> bytes:
@@ -243,6 +273,10 @@ class CodexAcquirer:
                             raise _safe_error(f"{product}: authentication failed")
                         if _is_retryable_status(response.status_code):
                             last_retryable = f"{product}: transient HTTP {response.status_code}"
+                            LOGGER.warning(
+                                "Codex product request is retryable",
+                                extra={"product": product, "status_code": response.status_code},
+                            )
                             if attempt < self._config.max_retries:
                                 time.sleep(self._backoff_seconds(attempt))
                                 continue
@@ -299,6 +333,7 @@ class CodexAcquirer:
                         temporary_path.unlink(missing_ok=True)
                         temporary_path = None
                     last_retryable = f"{product}: request timed out"
+                    LOGGER.warning("Codex product request timed out", extra={"product": product})
                     if attempt < self._config.max_retries:
                         time.sleep(self._backoff_seconds(attempt))
                         continue
@@ -308,6 +343,7 @@ class CodexAcquirer:
                         temporary_path.unlink(missing_ok=True)
                         temporary_path = None
                     last_retryable = f"{product}: network request failed"
+                    LOGGER.warning("Codex product request failed", extra={"product": product})
                     if attempt < self._config.max_retries:
                         time.sleep(self._backoff_seconds(attempt))
                         continue
@@ -365,10 +401,7 @@ class CodexAcquirer:
                 "products": [observation.__dict__ for observation in observations],
             }
             _atomic_write_bytes(staging / "manifest.json", manifest_bytes(manifest))
-            output_dir.mkdir(parents=True, exist_ok=True)
-            for observation in observations:
-                (staging / observation.filename).replace(output_dir / observation.filename)
-            (staging / "manifest.json").replace(output_dir / "manifest.json")
+            _publish_staged(staging, output_dir)
             return observations
 
 

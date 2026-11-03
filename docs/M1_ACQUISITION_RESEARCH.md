@@ -121,3 +121,16 @@ These tests are for M1.2 and are not run in this research-only task:
 The static-download route and token-bearing resource endpoint are sufficiently identified for a controlled acquisition review. Product inventory metadata, authenticated response headers, exact sizes, and `connections_princeton` pre-filter status are not yet verified. No real FAFB bytes or credentials were accessed in M1.1.
 
 Stop here and wait for review. M1.2 may begin only after explicit authorization for an authenticated, controlled acquisition.
+
+### M1.2 implementation gate
+
+The acquisition CLI intentionally does not scrape `/api/download`: Codex's
+unauthenticated response is a sign-in page, and no supported authenticated
+product-inventory endpoint was identified. `discover_inventory()` therefore
+fails closed before any product request. A future acquisition may proceed only
+after an official inventory mechanism is documented and implemented.
+
+Retry delays use bounded exponential backoff plus capped random jitter. The
+four products are downloaded into a unique staging directory, validated as a
+complete bundle, and published by directory swap with rollback; a failed stage
+or manifest write cannot replace a previous complete output.
