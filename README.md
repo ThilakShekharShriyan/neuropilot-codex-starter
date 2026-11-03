@@ -43,6 +43,12 @@ Do not rewrite FlyGym or MuJoCo in Rust. Integrate the scientific simulator thro
    ```
    The real-data server is loopback-only; the browser receives only bounded
    JSON responses and never receives the Codex token.
+   For the M2 CPU simulation service:
+   ```bash
+   PYTHONPATH=python uv run --project . python -m neuropilot_sim.server --port 8790
+   ```
+   It exposes `/health`, `/api/v1/simulation/state`, and bounded reset/step/close
+   endpoints on loopback only.
 5. Ask Codex to inspect the repository and propose a minimal Milestone 0 implementation:
    > Read AGENTS.md, plan.md, skills.md. Do not implement future milestones. Inspect my machine and repository, report missing prerequisites, and propose the smallest verified Milestone 0.
 6. Work milestone by milestone. Do not advance until the acceptance checklist is met.
