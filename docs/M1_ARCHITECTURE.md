@@ -110,7 +110,7 @@ Query rules:
 
 - `direction` is required and is `incoming`, `outgoing`, or `both`;
 - `limit` is bounded by the service, with a documented default and maximum;
-- `cursor` is an integrity-checked client-visible pagination token bound to the imported artifact, schema version, graph limits, and complete query tuple; malformed, modified, stale, or out-of-range cursors fail closed;
+- `cursor` is an integrity-checked client-visible pagination token bound to the imported artifact, schema version, graph limits, and complete query tuple; malformed, modified, stale, or out-of-range cursors fail closed. Its checksum detects accidental or unsophisticated modification; it is not a cryptographic authorization mechanism, which is appropriate only for this local read-only contract.
 - `min_synapses` is an explicit pair-level filter, defaulting to the measured source/portal policy used by the imported product;
 - `aggregate=false` preserves one row per `(pre, post, neuropil)`; `aggregate=true` sums `synapse_count` by endpoint pair and returns the aggregation rule.
 

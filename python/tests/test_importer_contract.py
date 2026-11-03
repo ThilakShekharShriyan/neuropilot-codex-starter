@@ -184,6 +184,27 @@ def test_pair_threshold_sums_neuropils_and_preserves_unaggregated_rows() -> None
     assert {row["neuropil"] for row in result.retained_rows} == {"A", "B"}
 
 
+def test_pair_threshold_rejects_pair_total_overflow() -> None:
+    rows = [
+        {
+            "pre_root_id": "100",
+            "post_root_id": "200",
+            "neuropil": "A",
+            "syn_count": "18446744073709551615",
+            "nt_type": "ACh",
+        },
+        {
+            "pre_root_id": "100",
+            "post_root_id": "200",
+            "neuropil": "B",
+            "syn_count": "1",
+            "nt_type": "ACh",
+        },
+    ]
+    with pytest.raises(ValidationError, match="pair synapse total exceeds uint64"):
+        pair_threshold(rows, min_synapses=5)
+
+
 def test_pair_below_threshold_is_excluded_and_reciprocal_pair_is_separate() -> None:
     rows = [
         {

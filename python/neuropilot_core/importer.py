@@ -154,7 +154,10 @@ def pair_threshold(rows: list[Mapping[str, str]], min_synapses: int = 5) -> Pair
         pre = parse_uint64(row["pre_root_id"], "pre_root_id")
         post = parse_uint64(row["post_root_id"], "post_root_id")
         syn_count = parse_positive_decimal(row["syn_count"], "syn_count")
-        totals[(pre, post)] += syn_count
+        total = totals[(pre, post)]
+        if total > MAX_UINT64 - syn_count:
+            raise ValidationError("connections_princeton: pair synapse total exceeds uint64")
+        totals[(pre, post)] = total + syn_count
     qualifying = frozenset(pair for pair, total in totals.items() if total >= min_synapses)
     retained = tuple(
         row

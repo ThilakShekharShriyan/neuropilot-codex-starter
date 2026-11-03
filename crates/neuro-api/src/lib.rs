@@ -118,7 +118,10 @@ impl GraphService {
         if limits.page_limit_max == 0 || limits.graph_cap == 0 {
             return Err(QueryError::InvalidConfiguration);
         }
-        if artifact_hash.is_empty() || artifact_hash.contains('|') {
+        if artifact_hash.len() != 64
+            || !artifact_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || artifact_hash.contains('|')
+        {
             return Err(QueryError::InvalidArtifactHash);
         }
         let mut neuron_map = BTreeMap::new();
@@ -186,16 +189,16 @@ impl GraphService {
             return Err(QueryError::InvalidThreshold);
         }
 
+        let candidates = self.filtered_edges(query)?;
+        let visible_len = candidates.len().min(self.graph_cap);
         let offset = if let Some(cursor) = &query.cursor {
-            self.decode_cursor(cursor, query)?
+            self.decode_cursor(cursor, query, visible_len)?
         } else {
             0
         };
-        let candidates = self.filtered_edges(query)?;
         if candidates.len() > self.graph_cap && offset >= self.graph_cap {
             return Err(QueryError::GraphCapExceeded);
         }
-        let visible_len = candidates.len().min(self.graph_cap);
         if offset > visible_len {
             return Err(QueryError::CursorOutOfRange);
         }
@@ -252,19 +255,17 @@ impl GraphService {
                 candidates.extend(
                     self.incoming
                         .get(&query.root_id)
-                        .cloned()
-                        .unwrap_or_default(),
+                        .into_iter()
+                        .flatten()
+                        .filter(|edge| {
+                            !(edge.pre_root_id == query.root_id
+                                && edge.post_root_id == query.root_id)
+                        })
+                        .cloned(),
                 );
             }
         }
         candidates.sort_by(Edge::cmp);
-        candidates.dedup_by(|left, right| {
-            left.pre_root_id == right.pre_root_id
-                && left.post_root_id == right.post_root_id
-                && left.neuropil == right.neuropil
-                && left.synapse_count == right.synapse_count
-                && left.nt_type == right.nt_type
-        });
         let mut qualifying: Vec<Edge> = candidates
             .into_iter()
             .filter(|edge| {
@@ -316,7 +317,12 @@ impl GraphService {
         format!("{payload}|{:016x}", cursor_checksum(&payload))
     }
 
-    fn decode_cursor(&self, cursor: &str, query: &Query) -> Result<usize, QueryError> {
+    fn decode_cursor(
+        &self,
+        cursor: &str,
+        query: &Query,
+        visible_len: usize,
+    ) -> Result<usize, QueryError> {
         let parts: Vec<&str> = cursor.split('|').collect();
         if parts.len() != 10 {
             return Err(QueryError::CursorMalformed);
@@ -340,7 +346,6 @@ impl GraphService {
         let offset = parts[8]
             .parse::<usize>()
             .map_err(|_| QueryError::CursorMalformed)?;
-        let visible_len = self.filtered_edges(query)?.len().min(self.graph_cap);
         if offset > visible_len {
             return Err(QueryError::CursorOutOfRange);
         }
@@ -377,7 +382,7 @@ mod tests {
                 snapshot: "fixture-1".into(),
             },
             1,
-            "artifact123".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "manifest-sha256:fixture".into(),
             vec![
                 Neuron {
@@ -590,7 +595,43 @@ mod tests {
     }
 
     #[test]
-    fn constructor_and_pair_totals_reject_overflow() {
+    fn graph_cap_supports_multiple_pages_then_stops() {
+        let mut graph = service(2);
+        graph.outgoing.get_mut("100").unwrap().push(Edge {
+            pre_root_id: "100".into(),
+            post_root_id: "200".into(),
+            neuropil: "C".into(),
+            synapse_count: 1,
+            nt_type: Some("ACh".into()),
+        });
+        let first = graph
+            .query_connections(&Query {
+                root_id: "100".into(),
+                direction: Direction::Outgoing,
+                limit: 1,
+                cursor: None,
+                min_synapses: 5,
+                aggregate: false,
+            })
+            .expect("first page succeeds");
+        assert!(first.truncated);
+        let second = graph
+            .query_connections(&Query {
+                root_id: "100".into(),
+                direction: Direction::Outgoing,
+                limit: 1,
+                cursor: first.next_cursor,
+                min_synapses: 5,
+                aggregate: false,
+            })
+            .expect("second page succeeds");
+        assert_eq!(second.edges.len(), 1);
+        assert!(second.next_cursor.is_none());
+        assert!(second.truncated);
+    }
+
+    #[test]
+    fn invalid_artifact_hash_is_rejected() {
         let result = GraphService::new(
             DatasetRef {
                 id: "synthetic".into(),
@@ -598,6 +639,29 @@ mod tests {
             },
             1,
             "artifact123".into(),
+            "manifest-sha256:fixture".into(),
+            vec![Neuron {
+                root_id: "100".into(),
+                primary_type: None,
+            }],
+            Vec::new(),
+            ServiceLimits {
+                page_limit_max: 1,
+                graph_cap: 1,
+            },
+        );
+        assert!(matches!(result, Err(QueryError::InvalidArtifactHash)));
+    }
+
+    #[test]
+    fn constructor_and_pair_totals_reject_overflow() {
+        let result = GraphService::new(
+            DatasetRef {
+                id: "synthetic".into(),
+                snapshot: "fixture-1".into(),
+            },
+            1,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "manifest-sha256:fixture".into(),
             vec![
                 Neuron {
@@ -681,6 +745,38 @@ mod tests {
             .expect("query succeeds");
         assert_eq!(response.edges[0].synapse_count, 1);
         assert_eq!(response.edges[1].synapse_count, 2);
+
+        let mut identical = service(10);
+        identical
+            .outgoing
+            .get_mut("100")
+            .expect("outgoing fixture")
+            .push(Edge {
+                pre_root_id: "100".into(),
+                post_root_id: "200".into(),
+                neuropil: "A".into(),
+                synapse_count: 2,
+                nt_type: Some("ACh".into()),
+            });
+        let preserved = identical
+            .query_connections(&Query {
+                root_id: "100".into(),
+                direction: Direction::Outgoing,
+                limit: 2,
+                cursor: None,
+                min_synapses: 1,
+                aggregate: false,
+            })
+            .expect("query preserves duplicate source rows");
+        assert_eq!(preserved.edges.len(), 2);
+        assert_eq!(
+            preserved
+                .edges
+                .iter()
+                .filter(|edge| edge.neuropil == "A" && edge.synapse_count == 2)
+                .count(),
+            2
+        );
     }
 
     #[test]
