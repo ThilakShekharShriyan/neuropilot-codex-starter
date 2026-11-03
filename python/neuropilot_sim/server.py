@@ -204,7 +204,7 @@ class SimulationService:
             state = self.simulation.step(values)
             self.last_control_latency_ms = (time.perf_counter_ns() - started) / 1e6
             self.last_control_sequence = sequence
-            if mode == "active":
+            if mode == "active" and any(value != 0.0 for value in values):
                 self.last_control_monotonic = time.monotonic()
             payload = self._control_payload()
             payload["state"] = self._payload(state)

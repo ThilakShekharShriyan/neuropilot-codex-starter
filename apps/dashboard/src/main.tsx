@@ -250,7 +250,8 @@ function App() {
         lateral: applyDeadzone(pad.axes[0] ?? 0),
         turn: applyDeadzone(pad.axes[2] ?? 0),
       };
-      void sendControlRef.current(channels, "active", "gamepad");
+      const mode = channels.forward === 0 && channels.lateral === 0 && channels.turn === 0 ? "neutral" : "active";
+      void sendControlRef.current(channels, mode, "gamepad");
     };
     const onGamepadDisconnected = () => {
       setGamepadConnected(false);

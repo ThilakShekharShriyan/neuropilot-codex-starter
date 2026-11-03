@@ -189,6 +189,23 @@ def test_neutral_control_does_not_refresh_watchdog() -> None:
     service.close()
 
 
+def test_idle_gamepad_zero_input_does_not_refresh_watchdog() -> None:
+    service = SimulationService(FlySimulation())
+    session = service.control_session()
+    control_id = session["control_session_id"]
+    service.control_resume(control_id)
+    service.control_input(
+        control_id, 1, [0.0] * session["actuator_count"], "gamepad", "active"
+    )
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and service.control_status_payload()["status"] == "active":
+        time.sleep(0.02)
+    status = service.control_status_payload()
+    assert status["status"] == "stopped"
+    assert status["watchdog_trips"] == 1
+    service.close()
+
+
 def test_control_watchdog_neutralizes_and_stops() -> None:
     service = SimulationService(FlySimulation())
     control_id = service.control_session()["control_session_id"]

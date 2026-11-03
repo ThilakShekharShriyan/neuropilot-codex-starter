@@ -319,4 +319,7 @@ reconnect/failure-injection coverage, and the measured end-to-end latency
 acceptance artifact remain outstanding. The dashboard now supports optional
 Gamepad API polling at a bounded 20 Hz, applies a `0.1` axis deadzone, sends
 through the same three-channel contract, and neutralizes on disconnect. Gamepad
-availability is informational; it never activates a control session.
+availability is informational; it never activates a control session. All-zero
+gamepad samples are sent as `neutral`, and Python defensively does not refresh
+the watchdog for an all-zero actuator vector even if a client labels it
+`active`.
