@@ -316,4 +316,7 @@ a bounded latest-value-wins queue. The lifecycle slice adds explicit resume-gate
 forwarding, pause/stop neutralization, heartbeat handling, watchdog stopping, and
 session/sequence enforcement. Frontend keyboard/gamepad controls, broader
 reconnect/failure-injection coverage, and the measured end-to-end latency
-acceptance artifact remain outstanding.
+acceptance artifact remain outstanding. The dashboard now supports optional
+Gamepad API polling at a bounded 20 Hz, applies a `0.1` axis deadzone, sends
+through the same three-channel contract, and neutralizes on disconnect. Gamepad
+availability is informational; it never activates a control session.

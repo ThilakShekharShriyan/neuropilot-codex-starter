@@ -142,6 +142,7 @@ function App() {
   const [simulationStatus, setSimulationStatus] = useState<"idle" | "loading" | "closed" | "error">("idle");
   const [control, setControl] = useState<ControlStatus | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
+  const [gamepadConnected, setGamepadConnected] = useState(false);
   const controlStatusRef = useRef<ControlStatus["status"]>("disconnected");
   const controlSequenceRef = useRef(0);
   const controlChannelsRef = useRef<ControlChannels>({ forward: 0, lateral: 0, turn: 0 });
@@ -171,7 +172,7 @@ function App() {
     }
   };
 
-  const sendControl = async (channels: ControlChannels, mode: "active" | "neutral") => {
+  const sendControl = async (channels: ControlChannels, mode: "active" | "neutral", source: "keyboard" | "gamepad" = "keyboard") => {
     if (controlStatusRef.current !== "active" || !control?.control_session_id) return;
     controlChannelsRef.current = channels;
     const sequence = controlSequenceRef.current + 1;
@@ -183,7 +184,7 @@ function App() {
         sequence,
         issued_at_ms: Date.now(),
         control: channels,
-        source: "keyboard",
+        source,
         mode,
       });
       if (result.state) setSimulation(result.state);
@@ -235,6 +236,31 @@ function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
+  useEffect(() => {
+    const applyDeadzone = (value: number) => Math.abs(value) < 0.1 ? 0 : Math.max(-1, Math.min(1, value));
+    const pollGamepad = () => {
+      const pad = Array.from(navigator.getGamepads?.() ?? []).find((candidate): candidate is Gamepad => candidate !== null);
+      setGamepadConnected((previous) => previous === Boolean(pad) ? previous : Boolean(pad));
+      if (!pad || controlStatusRef.current !== "active") return;
+      const channels = {
+        forward: applyDeadzone(-(pad.axes[1] ?? 0)),
+        lateral: applyDeadzone(pad.axes[0] ?? 0),
+        turn: applyDeadzone(pad.axes[2] ?? 0),
+      };
+      void sendControlRef.current(channels, "active", "gamepad");
+    };
+    const onGamepadDisconnected = () => {
+      setGamepadConnected(false);
+      if (controlStatusRef.current === "active") void sendControlRef.current({ forward: 0, lateral: 0, turn: 0 }, "neutral", "gamepad");
+    };
+    const timer = window.setInterval(pollGamepad, 50);
+    window.addEventListener("gamepaddisconnected", onGamepadDisconnected);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("gamepaddisconnected", onGamepadDisconnected);
     };
   }, []);
 
@@ -322,7 +348,7 @@ function App() {
       {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
       <section className={`simulation-panel ${simulationStatus === "error" ? "degraded" : ""}`} aria-label="CPU simulation controls"><div><span className="eyebrow">M2 / SIMULATED LIVE</span><h2>NeuroMechFly CPU session</h2><p>{simulation ? `session ${simulation.session_id} · ${simulation.status} · t = ${simulation.time.toFixed(4)} s · ${simulation.step_count} steps · last step ${simulation.step_latency_ms?.toFixed(2) ?? "—"} ms` : simulationStatus === "closed" ? "Session closed" : simulationStatus === "error" ? "Simulation disconnected or invalid" : "No simulation state loaded"}</p>{metrics && <small>Requests {metrics.request_count} · errors {metrics.error_count} · resets {metrics.reset_count}</small>}</div><div className="simulation-actions"><button onClick={() => simulationAction("state")} disabled={simulationStatus === "loading"}>State</button><button onClick={() => simulationAction("metrics")} disabled={simulationStatus === "loading"}>Telemetry</button><button onClick={() => simulationAction("reset")} disabled={simulationStatus === "loading"}>Reset</button><button onClick={() => simulationAction("restart")} disabled={simulationStatus === "loading"}>Restart</button><button onClick={() => simulationAction("step")} disabled={simulationStatus === "loading" || simulationStatus === "closed"}>Step</button><button onClick={() => simulationAction("close")} disabled={simulationStatus === "loading" || simulationStatus === "closed"}>Close</button></div><small>Observed state from the CPU simulator; not connectome activity or anatomical coordinates.</small></section>
-      <section className="control-panel m4-control" aria-label="M4 simulated keyboard control"><div><span className="eyebrow">M4 / SIMULATED CONTROL</span><h2>Keyboard input</h2><p>{control ? `control ${control.status} · session ${control.control_session_id} · watchdog ${control.watchdog_timeout_ms} ms` : "No control session attached"}</p><small>W/S or ↑/↓: forward · A/D or ←/→: turn · Q/E: lateral</small>{controlError && <p className="notice error" role="alert">{controlError}</p>}</div><div className="simulation-actions"><button onClick={() => void controlAction("session")} disabled={control?.status === "active"}>Connect</button><button onClick={() => void controlAction("resume")} disabled={!control || control.status === "active" || control.status === "disconnected"}>Resume</button><button onClick={() => void controlAction("pause")} disabled={!control || control.status !== "active"}>Pause</button><button className="danger" onClick={() => void controlAction("stop")} disabled={!control || control.status === "stopped" || control.status === "disconnected"}>Emergency stop</button><button onClick={() => void controlAction("reset")} disabled={!control}>Reset control</button><button onClick={() => void controlAction("heartbeat")} disabled={!control || control.status !== "active"}>Heartbeat</button></div><small>Engineering control only · no connectome or biological motor mapping · stop requires reset before resume.</small></section>
+      <section className="control-panel m4-control" aria-label="M4 simulated keyboard and gamepad control"><div><span className="eyebrow">M4 / SIMULATED CONTROL</span><h2>Keyboard and optional gamepad</h2><p>{control ? `control ${control.status} · session ${control.control_session_id} · watchdog ${control.watchdog_timeout_ms} ms` : "No control session attached"}</p><small>W/S or ↑/↓: forward · A/D or ←/→: turn · Q/E: lateral · gamepad: {gamepadConnected ? "connected" : "not detected"}</small>{controlError && <p className="notice error" role="alert">{controlError}</p>}</div><div className="simulation-actions"><button onClick={() => void controlAction("session")} disabled={control?.status === "active"}>Connect</button><button onClick={() => void controlAction("resume")} disabled={!control || control.status === "active" || control.status === "disconnected"}>Resume</button><button onClick={() => void controlAction("pause")} disabled={!control || control.status !== "active"}>Pause</button><button className="danger" onClick={() => void controlAction("stop")} disabled={!control || control.status === "stopped" || control.status === "disconnected"}>Emergency stop</button><button onClick={() => void controlAction("reset")} disabled={!control}>Reset control</button><button onClick={() => void controlAction("heartbeat")} disabled={!control || control.status !== "active"}>Heartbeat</button></div><small>Engineering control only · no connectome or biological motor mapping · stop requires reset before resume.</small></section>
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
         {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref} · source manifest {connections.provenance.source_manifest_sha256.slice(0, 12)}… · {connections.provenance.products.length} source files{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
       </section>
