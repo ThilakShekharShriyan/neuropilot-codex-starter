@@ -205,6 +205,19 @@ def test_pair_threshold_rejects_pair_total_overflow() -> None:
         pair_threshold(rows, min_synapses=5)
 
 
+def test_validate_bundle_reports_pair_total_overflow() -> None:
+    bundle = synthetic_bundle()
+    raw = gzip.decompress(bundle["connections_princeton"]).decode()
+    raw = raw.replace(",2,ACh", ",18446744073709551615,ACh", 1)
+    raw = raw.replace(",3,ACh", ",1,ACh", 1)
+    bundle["connections_princeton"] = gzip.compress(raw.encode(), mtime=0)
+
+    report = validate_bundle(bundle)
+
+    assert not report.valid
+    assert report.products["connections_princeton"].pair_total_overflow_count == 1
+
+
 def test_pair_below_threshold_is_excluded_and_reciprocal_pair_is_separate() -> None:
     rows = [
         {

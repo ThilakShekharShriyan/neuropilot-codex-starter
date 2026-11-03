@@ -76,6 +76,7 @@ class ProductReport:
     invalid_uint64_count: int = 0
     invalid_float_count: int = 0
     invalid_synapse_count: int = 0
+    pair_total_overflow_count: int = 0
     self_loop_count: int = 0
     source_rows_below_five: int = 0
     errors: list[str] = field(default_factory=list)
@@ -245,6 +246,7 @@ def validate_bundle(bundle: Mapping[str, bytes]) -> BundleReport:
                 report.missing_annotation_value_count += 1
 
     connections_report = reports["connections_princeton"]
+    pair_totals: defaultdict[tuple[int, int], int] = defaultdict(int)
     for row in parsed_rows["connections_princeton"]:
         try:
             pre = parse_uint64(row["pre_root_id"], "pre_root_id")
@@ -266,12 +268,22 @@ def validate_bundle(bundle: Mapping[str, bytes]) -> BundleReport:
         else:
             if syn_count < 5:
                 connections_report.source_rows_below_five += 1
+            pair = (pre, post)
+            total = pair_totals[pair]
+            if total > MAX_UINT64 - syn_count:
+                connections_report.pair_total_overflow_count += 1
+                connections_report.errors.append(
+                    "connections_princeton: pair synapse total exceeds uint64"
+                )
+            else:
+                pair_totals[pair] = total + syn_count
 
     valid = all(
         report.duplicate_id_count == 0
         and report.invalid_uint64_count == 0
         and report.invalid_float_count == 0
         and report.invalid_synapse_count == 0
+        and report.pair_total_overflow_count == 0
         and report.dangling_endpoint_count == 0
         for report in reports.values()
     )
@@ -290,6 +302,7 @@ def assert_valid(report: BundleReport) -> None:
         or report_data.invalid_uint64_count
         or report_data.invalid_float_count
         or report_data.invalid_synapse_count
+        or report_data.pair_total_overflow_count
         or report_data.dangling_endpoint_count
     }
     raise ValidationError(json.dumps(failures, sort_keys=True))
