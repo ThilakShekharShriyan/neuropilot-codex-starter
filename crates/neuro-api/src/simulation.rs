@@ -11,6 +11,10 @@ pub const MAX_CONTROL_VALUES: usize = 256;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SimulationState {
     pub data_kind: String,
+    pub session_id: String,
+    pub status: String,
+    pub step_count: u64,
+    pub step_latency_ms: Option<f64>,
     pub time: f64,
     pub joint_angles: Vec<f64>,
     pub joint_velocities: Vec<f64>,
@@ -137,8 +141,15 @@ impl SimulationGateway {
 
 fn validate_state(state: &SimulationState) -> Result<(), GatewayError> {
     if state.data_kind != "simulated-live"
+        || state.session_id.is_empty()
+        || state.session_id.len() > 128
+        || !matches!(state.status.as_str(), "live" | "closed")
+        || state.step_count > 10_000_000
         || !state.time.is_finite()
         || state.time < 0.0
+        || state
+            .step_latency_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
         || state.joint_angles.len() > 10_000
         || state.joint_velocities.len() > 10_000
         || state.body_positions.len() > 10_000
@@ -175,7 +186,7 @@ mod tests {
     use super::{GatewayError, SimulationGateway};
 
     fn valid_body() -> &'static str {
-        r#"{"data_kind":"simulated-live","time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#
+        r#"{"data_kind":"simulated-live","session_id":"test-session","status":"live","step_count":1,"step_latency_ms":0.2,"time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#
     }
 
     async fn mock_once(
@@ -247,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_data_kind_is_rejected() {
-        let body = r#"{"data_kind":"observed","time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#;
+        let body = r#"{"data_kind":"observed","session_id":"test-session","status":"live","step_count":1,"step_latency_ms":0.2,"time":0.1,"joint_angles":[0.0],"joint_velocities":[0.0],"body_positions":[[0.0,0.0,0.0]]}"#;
         let (port, task) = mock_once(200, body, Duration::ZERO).await;
         let gateway =
             SimulationGateway::new(&format!("http://127.0.0.1:{port}"), Duration::from_secs(1))

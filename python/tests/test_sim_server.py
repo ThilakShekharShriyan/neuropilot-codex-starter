@@ -27,11 +27,16 @@ def test_loopback_service_lifecycle() -> None:
             state = json.loads(response.read())
             assert state["data_kind"] == "simulated-live"
             assert state["time"] == 0.0
+            assert state["status"] == "live"
+            assert state["step_count"] == 0
         request = urllib.request.Request(
             f"{base}/api/v1/simulation/step", data=b"{}", method="POST"
         )
         with urllib.request.urlopen(request) as response:
-            assert json.loads(response.read())["time"] > 0.0
+            state = json.loads(response.read())
+            assert state["time"] > 0.0
+            assert state["step_count"] == 1
+            assert state["step_latency_ms"] >= 0.0
     finally:
         server.shutdown()
         server.server_close()

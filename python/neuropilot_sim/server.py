@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -28,22 +30,47 @@ class SimulationService:
     def __init__(self, simulation: FlySimulation) -> None:
         self.simulation = simulation
         self.lock = threading.Lock()
+        self.session_id = secrets.token_hex(8)
+        self.status = "live"
+        self.step_count = 0
+        self.last_step_latency_ms: float | None = None
+
+    def _payload(self, state: FlyState) -> dict[str, Any]:
+        payload = _state_payload(state)
+        payload.update(
+            {
+                "session_id": self.session_id,
+                "status": self.status,
+                "step_count": self.step_count,
+                "step_latency_ms": self.last_step_latency_ms,
+            }
+        )
+        return payload
 
     def state(self) -> dict[str, Any]:
         with self.lock:
-            return _state_payload(self.simulation.state())
+            return self._payload(self.simulation.state())
 
     def reset(self) -> dict[str, Any]:
         with self.lock:
-            return _state_payload(self.simulation.reset())
+            state = self.simulation.reset()
+            self.status = "live"
+            self.step_count = 0
+            self.last_step_latency_ms = None
+            return self._payload(state)
 
     def step(self, control: list[float] | None) -> dict[str, Any]:
         with self.lock:
-            return _state_payload(self.simulation.step(control))
+            started = time.perf_counter_ns()
+            state = self.simulation.step(control)
+            self.last_step_latency_ms = (time.perf_counter_ns() - started) / 1e6
+            self.step_count += 1
+            return self._payload(state)
 
     def close(self) -> None:
         with self.lock:
             self.simulation.close()
+            self.status = "closed"
 
 
 def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
@@ -108,7 +135,14 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                     self._send(200, service.step(control))
                 elif self.path == "/api/v1/simulation/close":
                     service.close()
-                    self._send(200, {"status": "closed", "data_kind": "simulated-live"})
+                    self._send(
+                        200,
+                        {
+                            "status": "closed",
+                            "data_kind": "simulated-live",
+                            "session_id": service.session_id,
+                        },
+                    )
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:
