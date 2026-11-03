@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import socket
+import subprocess
+import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -106,3 +111,38 @@ def test_concurrent_requests_count_without_lost_increments() -> None:
         server.shutdown()
         server.server_close()
         service.close()
+
+
+def test_subprocess_sigterm_exits_and_closes_server() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = "python"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "neuropilot_sim.server", "--port", str(port)],
+        cwd=os.getcwd(),
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        output = ""
+        while time.monotonic() < deadline and "listening" not in output:
+            line = process.stdout.readline() if process.stdout else ""
+            output += line
+        assert "listening" in output
+        process.terminate()
+        remaining, _ = process.communicate(timeout=5)
+        output += remaining
+        assert process.returncode == 0
+        assert "simulation service stopped" in output
+        with socket.socket() as connection:
+            connection.settimeout(0.5)
+            assert connection.connect_ex(("127.0.0.1", port)) != 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

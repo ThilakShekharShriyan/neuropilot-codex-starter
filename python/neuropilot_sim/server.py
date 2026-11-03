@@ -233,10 +233,18 @@ def main() -> int:
 
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)
+        server_thread = threading.Thread(target=server.serve_forever, name="simulation-http")
+        server_thread.start()
         try:
-            server.serve_forever()
+            while server_thread.is_alive():
+                server_thread.join(timeout=0.2)
         finally:
+            if not shutdown_requested.is_set():
+                shutdown_requested.set()
+                server.shutdown()
+            server_thread.join(timeout=2.0)
             server.server_close()
+            print("simulation service stopped", flush=True)
     return 0
 
 
