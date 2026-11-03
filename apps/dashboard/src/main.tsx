@@ -60,8 +60,9 @@ function GraphCanvas({ nodes, edges }: { nodes: Neuron[]; edges: Edge[] }) {
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
     let frame = 0;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const render = () => {
-      group.rotation.z += 0.0008;
+      if (!reducedMotion) group.rotation.z += 0.0008;
       renderer.render(scene, camera);
       frame = requestAnimationFrame(render);
     };
@@ -133,8 +134,8 @@ function App() {
         <button onClick={search} disabled={status === "loading"}>Search</button><button onClick={loadGraph} disabled={status === "loading"}>Expand graph</button>
         <div className="direction-group" role="group" aria-label="Connection direction">{(["incoming", "outgoing", "both"] as const).map((value) => <button className={direction === value ? "selected" : ""} key={value} onClick={() => setDirection(value)}>{value}</button>)}</div>
       </section>
-      {status === "loading" && <p className="notice">Loading source-backed records…</p>}
-      {error && <p className="notice error">{error}</p>}
+      {status === "loading" && <p className="notice" role="status">Loading source-backed records…</p>}
+      {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
         {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Provenance: {connections.provenance_ref}{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
