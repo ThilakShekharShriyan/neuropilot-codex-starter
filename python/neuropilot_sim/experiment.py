@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import importlib.metadata
 import json
 import math
 import platform
 import statistics
+import subprocess
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from .adapter import FlySimulation, FlySimulationConfig
 
@@ -17,10 +21,11 @@ from .adapter import FlySimulation, FlySimulationConfig
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
     seed: int = 0
-    repetitions: int = 3
+    repetitions: int = 10
     steps: int = 50
     amplitude: float = 0.05
     comparison_amplitudes: tuple[float, ...] = (0.025, 0.05, 0.1)
+    seed_list: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.repetitions < 2:
@@ -33,6 +38,16 @@ class ExperimentConfig:
             not math.isfinite(value) or value <= 0.0 for value in self.comparison_amplitudes
         ):
             raise ValueError("comparison amplitudes must be finite and positive")
+        if self.seed_list is not None:
+            if len(self.seed_list) != self.repetitions:
+                raise ValueError("seed_list length must equal repetitions")
+            if len(set(self.seed_list)) != len(self.seed_list):
+                raise ValueError("seed_list must contain distinct seeds")
+
+    def seeds(self) -> tuple[int, ...]:
+        if self.seed_list is not None:
+            return self.seed_list
+        return tuple(self.seed + index for index in range(self.repetitions))
 
 
 def _metric(
@@ -75,7 +90,7 @@ def _run_condition(config: ExperimentConfig, seed: int, perturb: bool) -> dict[s
         return metrics
 
 
-def _summary(rows: list[dict[str, float]]) -> dict[str, dict[str, float | int]]:
+def _summary(rows: list[dict[str, float]]) -> dict[str, dict[str, float | int | bool]]:
     metric_names = tuple(rows[0])
     return {
         name: _uncertainty([row[name] for row in rows])
@@ -83,7 +98,7 @@ def _summary(rows: list[dict[str, float]]) -> dict[str, dict[str, float | int]]:
     }
 
 
-def _uncertainty(values: list[float]) -> dict[str, float | int]:
+def _uncertainty(values: list[float]) -> dict[str, float | int | bool]:
     mean = statistics.fmean(values)
     sample_stddev = statistics.stdev(values) if len(values) > 1 else 0.0
     standard_error = sample_stddev / math.sqrt(len(values))
@@ -93,22 +108,81 @@ def _uncertainty(values: list[float]) -> dict[str, float | int]:
         "sample_stddev": sample_stddev,
         "standard_error": standard_error,
         "ci95_half_width": 1.96 * standard_error,
+        "no_variation_observed": sample_stddev == 0.0,
     }
 
 
+def _effect_sizes(rows: list[dict[str, float]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for name in rows[0]:
+        values = [row[name] for row in rows]
+        mean = statistics.fmean(values)
+        sample_stddev = statistics.stdev(values) if len(values) > 1 else 0.0
+        result[name] = {
+            "standardized_mean_delta": (
+                mean / sample_stddev if sample_stddev > 0.0 else None
+            ),
+            "method": "paired mean delta divided by sample standard deviation",
+            "no_variation_observed": sample_stddev == 0.0,
+        }
+    return result
+
+
 def _paired_runs(config: ExperimentConfig) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    seeds = config.seeds()
     baseline = [
-        _run_condition(config, config.seed + index, False)
-        for index in range(config.repetitions)
+        _run_condition(config, seed, False) for seed in seeds
     ]
     perturbation = [
-        _run_condition(config, config.seed + index, True)
-        for index in range(config.repetitions)
+        _run_condition(config, seed, True) for seed in seeds
     ]
     return baseline, perturbation
 
 
+def _per_seed(
+    seeds: tuple[int, ...],
+    baseline: list[dict[str, float]],
+    perturbation: list[dict[str, float]],
+) -> list[dict[str, object]]:
+    rows = []
+    for seed, base, perturb in zip(seeds, baseline, perturbation, strict=True):
+        rows.append(
+            {
+                "seed": seed,
+                "baseline": base,
+                "perturbation": perturb,
+                "paired_delta": {name: perturb[name] - base[name] for name in base},
+            }
+        )
+    return rows
+
+
+def _provenance() -> dict[str, object]:
+    project_root = Path(__file__).resolve().parents[2]
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project_root, text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_commit = "unknown"
+    lockfile = project_root / "uv.lock"
+    lockfile_hash = hashlib.sha256(lockfile.read_bytes()).hexdigest() if lockfile.exists() else None
+    packages = {}
+    for package in ("flygym", "mujoco", "httpx", "numpy"):
+        try:
+            packages[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            packages[package] = None
+    return {
+        "git_commit": git_commit,
+        "lockfile_sha256": lockfile_hash,
+        "dependency_versions": packages,
+        "artifact_sha256_scope": "canonical JSON before the artifact_sha256 field is added",
+    }
+
+
 def run_experiment(config: ExperimentConfig) -> dict[str, object]:
+    seeds = config.seeds()
     baseline, perturbation = _paired_runs(config)
     deltas = [
         {name: perturb[name] - base[name] for name in base}
@@ -127,9 +201,12 @@ def run_experiment(config: ExperimentConfig) -> dict[str, object]:
         comparison.append(
             {
                 "amplitude": amplitude,
+                "seed_list": list(seeds),
+                "per_seed": _per_seed(seeds, comparison_baseline, comparison_perturbation),
                 "paired_deltas": {
                     "replicates": comparison_deltas,
                     "summary": _summary(comparison_deltas),
+                    "effect_sizes": _effect_sizes(comparison_deltas),
                 },
             }
         )
@@ -144,7 +221,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, object]:
             "python_version": platform.python_version(),
             "platform": platform.platform(),
         },
-        "config": asdict(config),
+        "config": {**asdict(config), "seed_list": list(seeds)},
         "actuator_definition": "active-leg motor actuator order from FlyGym",
         "conditions": {
             "baseline": "zero control vector",
@@ -155,14 +232,62 @@ def run_experiment(config: ExperimentConfig) -> dict[str, object]:
             "replicates": perturbation,
             "summary": _summary(perturbation),
         },
-        "paired_deltas": {"replicates": deltas, "summary": _summary(deltas)},
+        "per_seed": _per_seed(seeds, baseline, perturbation),
+        "paired_deltas": {
+            "replicates": deltas,
+            "summary": _summary(deltas),
+            "effect_sizes": _effect_sizes(deltas),
+        },
         "comparison": comparison,
+        "provenance": _provenance(),
         "limitations": [
             "simulated biomechanics only; no neural dynamics or connectome controller",
-            "short horizon and small sample count",
+            "short horizon and finite CPU seed sample",
             "engineering control pattern is not an anatomical mapping",
         ],
     }
+
+
+def write_comparison_csv(result: dict[str, object], path: Path) -> None:
+    rows = []
+    for comparison in result["comparison"]:
+        summary = comparison["paired_deltas"]["summary"]
+        effects = comparison["paired_deltas"]["effect_sizes"]
+        for metric, values in summary.items():
+            rows.append(
+                {
+                    "amplitude": comparison["amplitude"],
+                    "metric": metric,
+                    "n": values["n"],
+                    "mean": values["mean"],
+                    "sample_stddev": values["sample_stddev"],
+                    "standard_error": values["standard_error"],
+                    "ci95_half_width": values["ci95_half_width"],
+                    "standardized_mean_delta": effects[metric]["standardized_mean_delta"],
+                    "no_variation_observed": values["no_variation_observed"],
+                }
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=tuple(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_artifact(result: dict[str, object], path: Path) -> tuple[str, str]:
+    canonical = json.loads(json.dumps(result, sort_keys=True))
+    canonical["provenance"].pop("artifact_sha256", None)
+    canonical_bytes = (json.dumps(canonical, indent=2, sort_keys=True) + "\n").encode()
+    canonical_hash = hashlib.sha256(canonical_bytes).hexdigest()
+    result["provenance"]["artifact_sha256"] = canonical_hash
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
+    path.write_bytes(payload)
+    final_hash = hashlib.sha256(payload).hexdigest()
+    path.with_suffix(path.suffix + ".sha256").write_text(
+        f"{final_hash}  {path.name}\n", encoding="utf-8"
+    )
+    return canonical_hash, final_hash
 
 
 def main() -> int:
@@ -173,7 +298,7 @@ def main() -> int:
         "--output", type=Path, default=Path("artifacts/m3_motor_perturbation.json")
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--amplitude", type=float, default=0.05)
     parser.add_argument(
@@ -181,7 +306,21 @@ def main() -> int:
         default="0.025,0.05,0.1",
         help="comma-separated positive amplitudes for the comparison sweep",
     )
+    parser.add_argument(
+        "--seeds",
+        help="comma-separated predeclared seeds; length must match --repetitions",
+    )
+    parser.add_argument(
+        "--comparison-csv",
+        type=Path,
+        default=Path("artifacts/m3_motor_perturbation_comparison.csv"),
+    )
     args = parser.parse_args()
+    seed_list = (
+        tuple(int(value) for value in args.seeds.split(",") if value)
+        if args.seeds
+        else None
+    )
     result = run_experiment(
         ExperimentConfig(
             seed=args.seed,
@@ -191,12 +330,12 @@ def main() -> int:
             comparison_amplitudes=tuple(
                 float(value) for value in args.comparison_amplitudes.split(",") if value
             ),
+            seed_list=seed_list,
         )
     )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    canonical_hash, final_hash = write_artifact(result, args.output)
+    write_comparison_csv(result, args.comparison_csv)
+    print(json.dumps({"canonical_sha256": canonical_hash, "artifact_sha256": final_hash}))
     print(json.dumps(result["paired_deltas"]["summary"], sort_keys=True))
     return 0
 
