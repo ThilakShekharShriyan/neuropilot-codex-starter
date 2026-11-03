@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import gzip
+import hashlib
+from pathlib import Path
+
+import httpx
+import pytest
+from neuropilot_core.acquisition import (
+    PRODUCTS,
+    AcquisitionConfig,
+    AcquisitionError,
+    CodexAcquirer,
+    manifest_bytes,
+    redact,
+)
+from neuropilot_core.fixtures import synthetic_bundle
+
+
+def _client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+def _config(tmp_path: Path, **kwargs) -> AcquisitionConfig:
+    return AcquisitionConfig(output_dir=tmp_path, retry_backoff_seconds=0, **kwargs)
+
+
+def test_missing_token_fails_before_network(tmp_path: Path) -> None:
+    with pytest.raises(AcquisitionError, match="missing or invalid"):
+        CodexAcquirer("", _config(tmp_path))
+
+
+def test_successful_stream_is_validated_and_atomically_finalized(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["data_product"] == "neurons"
+        assert request.url.params["dataset"] == "fafb"
+        assert request.url.params["api_token"] == "secret-token"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip", "etag": "observed"},
+            content=payload,
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        observation = acquirer.download_product("neurons")
+
+    final_path = tmp_path / "neurons.csv.gz"
+    assert final_path.read_bytes() == payload
+    assert observation.sha256 == hashlib.sha256(payload).hexdigest()
+    assert observation.row_count == 3
+    assert not list(tmp_path.glob("*.partial"))
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_errors_are_not_retried_or_leaked(tmp_path: Path, status: int) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, content=b'{"error":"bad"}', request=request)
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(AcquisitionError, match="authentication failed") as failure:
+            acquirer.download_product("neurons")
+    assert calls == 1
+    assert "secret-token" not in str(failure.value)
+    assert "api_token=" not in str(failure.value)
+
+
+def test_redirects_are_rejected_without_following(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": "https://evil.example/?api_token=secret-token"},
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(AcquisitionError, match="unexpected redirect") as failure:
+            acquirer.download_product("neurons")
+    assert "secret-token" not in str(failure.value)
+
+
+def test_transient_429_retries_then_succeeds(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, request=request)
+        return httpx.Response(
+            200, headers={"content-type": "application/gzip"}, content=payload, request=request
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        acquirer.download_product("neurons")
+    assert calls == 2
+
+
+def test_transient_5xx_is_bounded(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, request=request)
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path, max_retries=2), client=_client(handler)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="transient HTTP 503"):
+            acquirer.download_product("neurons")
+    assert calls == 3
+
+
+def test_timeout_cleans_partial_file(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("secret-token in an unsafe exception", request=request)
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path, max_retries=1), client=_client(handler)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="timed out") as failure:
+            acquirer.download_product("neurons")
+    assert "secret-token" not in str(failure.value)
+    assert not list(tmp_path.iterdir())
+
+
+def test_interrupted_transfer_cleans_partial_file(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(KeyboardInterrupt):
+            acquirer.download_product("neurons")
+    assert not list(tmp_path.iterdir())
+
+
+def test_oversized_compressed_response_is_rejected_and_cleaned(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/gzip"}, content=payload, request=request
+        )
+
+    with CodexAcquirer(
+        "secret-token",
+        _config(tmp_path, max_compressed_bytes=len(payload) - 1),
+        client=_client(handler),
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="compressed response exceeds"):
+            acquirer.download_product("neurons")
+    assert not list(tmp_path.iterdir())
+
+
+def test_decompressed_size_limit_is_enforced(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/gzip"}, content=payload, request=request
+        )
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path, max_decompressed_bytes=1), client=_client(handler)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="decompressed response exceeds"):
+            acquirer.download_product("neurons")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [(b"not gzip", "invalid gzip"), (gzip.compress(b"\xff\xfe"), "schema validation")],
+)
+def test_invalid_payloads_are_rejected(tmp_path: Path, payload: bytes, message: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/gzip"}, content=payload, request=request
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(AcquisitionError, match=message):
+            acquirer.download_product("neurons")
+    assert not list(tmp_path.iterdir())
+
+
+def test_unexpected_content_type_and_schema_are_rejected(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+
+    def wrong_type(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/json"}, content=payload, request=request
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(wrong_type)) as acquirer:
+        with pytest.raises(AcquisitionError, match="unexpected content type"):
+            acquirer.download_product("neurons")
+
+    bad_csv = gzip.compress(b"wrong,header\nvalue\n")
+
+    def wrong_schema(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/gzip"}, content=bad_csv, request=request
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(wrong_schema)) as acquirer:
+        with pytest.raises(AcquisitionError, match="schema validation"):
+            acquirer.download_product("neurons")
+
+
+def test_portal_inventory_must_expose_all_products(tmp_path: Path) -> None:
+    def missing_inventory(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"neurons classification", request=request)
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path), client=_client(missing_inventory)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="inventory"):
+            acquirer.inspect_portal()
+
+
+def test_acquire_all_writes_token_free_manifest_and_all_products(tmp_path: Path) -> None:
+    bundle = synthetic_bundle()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        product = request.url.params["data_product"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip"},
+            content=bundle[product],
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        observations = acquirer.acquire_all()
+
+    assert tuple(observation.product for observation in observations) == PRODUCTS
+    manifest = (tmp_path / "manifest.json").read_bytes()
+    assert b"secret-token" not in manifest
+    assert b"api_token=<redacted>" in manifest
+    assert b'"pairs_below_five":1' in manifest
+    assert b'"source_rows_below_five":3' in manifest
+    assert all((tmp_path / f"{product}.csv.gz").exists() for product in PRODUCTS)
+
+
+def test_bundle_validation_failure_removes_previously_finalized_products(tmp_path: Path) -> None:
+    bundle = synthetic_bundle()
+    bundle["connections_princeton"] = b"invalid gzip"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        product = request.url.params["data_product"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip"},
+            content=bundle[product],
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(AcquisitionError):
+            acquirer.acquire_all()
+    assert not list(tmp_path.iterdir())
+
+
+def test_manifest_serialization_is_deterministic_and_token_free() -> None:
+    manifest = {
+        "products": [{"name": "neurons", "sha256": "abc"}],
+        "resource_url_template": "https://example.invalid?api_token=<redacted>",
+    }
+    encoded = manifest_bytes(manifest)
+    assert encoded == manifest_bytes(manifest)
+    assert b"secret-token" not in encoded
+    assert b"api_token=<redacted>" in encoded
+
+
+def test_redaction_covers_authenticated_urls() -> None:
+    diagnostic = redact("GET https://example.invalid?api_token=secret-token&dataset=fafb")
+    assert "secret-token" not in diagnostic
+    assert "api_token=<redacted>" in diagnostic
+
+
+def test_products_are_sequentially_defined() -> None:
+    assert PRODUCTS == (
+        "neurons",
+        "classification",
+        "consolidated_cell_types",
+        "connections_princeton",
+    )

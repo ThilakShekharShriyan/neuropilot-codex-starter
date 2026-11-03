@@ -3,7 +3,9 @@ name = "neuropilot"
 version = "0.1.0"
 description = "Reproducible local-first NeuroPilot research platform"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "httpx>=0.28,<1",
+]
 
 [dependency-groups]
 dev = [
