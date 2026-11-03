@@ -278,6 +278,7 @@ impl SimulationGateway {
         control_session_id: &str,
         sequence: u64,
         source: &str,
+        mode: &str,
         values: Vec<f64>,
     ) -> Result<ControlForwardResponse, GatewayError> {
         let response = self
@@ -287,6 +288,7 @@ impl SimulationGateway {
                 "control_session_id": control_session_id,
                 "sequence": sequence,
                 "source": source,
+                "mode": mode,
                 "control": values,
             }))
             .send()

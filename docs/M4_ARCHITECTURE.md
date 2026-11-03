@@ -296,13 +296,8 @@ M4 implementation may be reviewed only after:
    configuration, limitations, and the distinction between simulator control
    and biological/connectome data.
 
-## Open design questions before implementation
+## Remaining planning questions
 
-- Confirm whether the Python service should accept a dedicated neutral-control
-  endpoint or reuse `/simulation/step` with a zero vector.
-- Confirm the active-leg actuator count at runtime and whether keyboard/gamepad
-  mappings should expose all actuators or a smaller named engineering control
-  surface.
 - Choose the exact watchdog interval and queue capacity after a local latency
   baseline; do not present the proposed values as safety certification.
 - Decide whether browser-issued timestamps are retained only in memory or in a
@@ -311,8 +306,8 @@ M4 implementation may be reviewed only after:
 The first implementation slice adds the Python control-session/status/reset
 payloads and Rust validation/proxy methods, with loopback failure-path tests.
 The second slice adds Rust-side three-channel validation, explicit mapping, and
-a bounded latest-value-wins queue. The input route remains fail-safe while the
-session is `paused` and reports `control_paused`; it does not forward motion to
-Python until the separately reviewed pause/resume and watchdog slice enables an
-active session. Emergency stop, heartbeat/watchdog execution, frontend controls,
-and gamepad handling remain outstanding.
+a bounded latest-value-wins queue. The lifecycle slice adds explicit resume-gated
+forwarding, pause/stop neutralization, heartbeat handling, watchdog stopping, and
+session/sequence enforcement. Frontend keyboard/gamepad controls, broader
+reconnect/failure-injection coverage, and the measured end-to-end latency
+acceptance artifact remain outstanding.

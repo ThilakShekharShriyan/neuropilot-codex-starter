@@ -435,7 +435,7 @@ async fn control_input(State(state): State<AppState>, Json(input): Json<ControlI
         Ok(value) => value,
         Err(error_value) => return gateway_error(error_value),
     };
-    let (ack, values) = {
+    let (ack, values, mode) = {
         let mut queue = match state.control_queue.lock() {
             Ok(value) => value,
             Err(_) => {
@@ -455,20 +455,21 @@ async fn control_input(State(state): State<AppState>, Json(input): Json<ControlI
             Ok(value) => value,
             Err(error_value) => return control_error(error_value),
         };
-        let Some((_, values)) = queue.pop_latest() else {
+        let Some((_, values, mode)) = queue.pop_latest() else {
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "control_queue_unavailable",
                 "control queue is unavailable",
             );
         };
-        (ack, values)
+        (ack, values, mode)
     };
     match simulation
         .control_input(
             &input.control_session_id,
             input.sequence,
             &input.source,
+            &mode,
             values,
         )
         .await

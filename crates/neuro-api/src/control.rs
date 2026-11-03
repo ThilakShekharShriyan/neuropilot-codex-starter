@@ -53,6 +53,7 @@ pub enum ControlError {
 struct QueuedControl {
     sequence: u64,
     values: Vec<f64>,
+    mode: String,
 }
 
 #[derive(Debug)]
@@ -139,6 +140,7 @@ impl ControlQueue {
         self.pending.push_back(QueuedControl {
             sequence: input.sequence,
             values,
+            mode: input.mode.clone(),
         });
         Ok(ControlAck {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -151,10 +153,10 @@ impl ControlQueue {
         })
     }
 
-    pub fn pop_latest(&mut self) -> Option<(u64, Vec<f64>)> {
+    pub fn pop_latest(&mut self) -> Option<(u64, Vec<f64>, String)> {
         self.pending
             .pop_back()
-            .map(|item| (item.sequence, item.values))
+            .map(|item| (item.sequence, item.values, item.mode))
     }
 
     pub fn reset(&mut self) {
@@ -211,7 +213,9 @@ mod tests {
         let second = queue.enqueue(&input(2), "control", "active", 2).unwrap();
         assert!(second.coalesced);
         assert_eq!(queue.coalesced_events(), 1);
-        assert_eq!(queue.pop_latest().unwrap().0, 2);
+        let latest = queue.pop_latest().unwrap();
+        assert_eq!(latest.0, 2);
+        assert_eq!(latest.2, "active");
         assert!(matches!(
             queue.enqueue(&input(2), "control", "active", 2),
             Err(ControlError::StaleSequence)

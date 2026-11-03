@@ -156,7 +156,9 @@ def test_control_lifecycle_input_and_watchdog() -> None:
     session = service.control_session()
     control_id = session["control_session_id"]
     assert service.control_resume(control_id)["status"] == "active"
-    forwarded = service.control_input(control_id, 1, [0.1] * session["actuator_count"], "keyboard")
+    forwarded = service.control_input(
+        control_id, 1, [0.1] * session["actuator_count"], "keyboard", "active"
+    )
     assert forwarded["forwarded"] is True
     assert forwarded["last_control_sequence"] == 1
     assert service.control_heartbeat(control_id)["status"] == "active"
@@ -164,6 +166,26 @@ def test_control_lifecycle_input_and_watchdog() -> None:
     assert service.control_stop(control_id)["status"] == "stopped"
     reset = service.control_reset()
     assert reset["status"] == "paused"
+    service.close()
+
+
+def test_neutral_control_does_not_refresh_watchdog() -> None:
+    service = SimulationService(FlySimulation())
+    session = service.control_session()
+    control_id = session["control_session_id"]
+    service.control_resume(control_id)
+    service.control_input(
+        control_id, 1, [0.1] * session["actuator_count"], "keyboard", "active"
+    )
+    time.sleep(0.1)
+    service.control_input(
+        control_id, 2, [0.0] * session["actuator_count"], "keyboard", "neutral"
+    )
+    assert service.control_status_payload()["status"] == "active"
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline and service.control_status_payload()["status"] == "active":
+        time.sleep(0.02)
+    assert service.control_status_payload()["status"] == "stopped"
     service.close()
 
 

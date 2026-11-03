@@ -184,12 +184,17 @@ class SimulationService:
         sequence: int,
         values: list[float],
         source: str,
+        mode: str,
     ) -> dict[str, Any]:
         with self.lock:
             self._validate_control_session(control_session_id)
             if self.control_status != "active":
                 raise ValueError("control session is not active")
-            if source not in {"keyboard", "gamepad"} or sequence <= self.last_control_sequence:
+            if (
+                source not in {"keyboard", "gamepad"}
+                or mode not in {"active", "neutral"}
+                or sequence <= self.last_control_sequence
+            ):
                 raise ValueError("control input is invalid")
             if len(values) != self.simulation.control_size or any(
                 not math.isfinite(value) or abs(value) > CONTROL_AUTHORITY for value in values
@@ -199,7 +204,8 @@ class SimulationService:
             state = self.simulation.step(values)
             self.last_control_latency_ms = (time.perf_counter_ns() - started) / 1e6
             self.last_control_sequence = sequence
-            self.last_control_monotonic = time.monotonic()
+            if mode == "active":
+                self.last_control_monotonic = time.monotonic()
             payload = self._control_payload()
             payload["state"] = self._payload(state)
             payload["forwarded"] = True
@@ -387,6 +393,7 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                             body.get("sequence", 0),
                             body.get("control", []),
                             body.get("source", ""),
+                            body.get("mode", "active"),
                         ),
                     )
                 else:
