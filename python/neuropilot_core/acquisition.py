@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,7 @@ class AcquisitionConfig:
     timeout: httpx.Timeout = field(default_factory=lambda: DEFAULT_TIMEOUT)
     max_retries: int = 3
     retry_backoff_seconds: float = 0.05
+    retry_jitter_seconds: float = 0.05
     importer_commit: str = "unknown"
 
 
@@ -176,8 +178,12 @@ class CodexAcquirer:
             raise AcquisitionError("CODEX_API_TOKEN is missing or invalid")
         if config.max_compressed_bytes <= 0 or config.max_decompressed_bytes <= 0:
             raise AcquisitionError("size limits must be positive")
-        if config.max_retries < 0:
-            raise AcquisitionError("max_retries must not be negative")
+        if (
+            config.max_retries < 0
+            or config.retry_backoff_seconds < 0
+            or config.retry_jitter_seconds < 0
+        ):
+            raise AcquisitionError("retry settings must not be negative")
         self._token = token
         self._config = config
         self._client = client or httpx.Client(
@@ -196,29 +202,27 @@ class CodexAcquirer:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def inspect_portal(self) -> httpx.Response:
-        """Fetch only the portal page; product bytes are never requested."""
-        try:
-            response = self._client.get(PORTAL_URL, params={"dataset": DATASET})
-        except httpx.TimeoutException as exc:
-            raise _safe_error("Codex portal inspection timed out") from exc
-        except httpx.RequestError as exc:
-            raise _safe_error("Codex portal inspection failed") from exc
-        if response.is_redirect or 300 <= response.status_code < 400:
-            raise _safe_error("Codex portal returned an unexpected redirect")
-        if response.status_code >= 400:
-            raise _safe_error(f"Codex portal returned HTTP {response.status_code}")
-        missing = [product for product in PRODUCTS if product not in response.text]
-        if missing:
-            raise _safe_error("Codex portal inventory did not expose all approved products")
-        return response
+    def discover_inventory(self) -> tuple[str, ...]:
+        """Fail closed because Codex documents no authenticated inventory API."""
+        raise AcquisitionError(
+            "Codex has no supported authenticated product-inventory mechanism; "
+            "refusing to scrape the sign-in portal or guess product identifiers"
+        )
 
-    def download_product(self, product: str) -> ProductObservation:
+    def _backoff_seconds(self, attempt: int) -> float:
+        base = self._config.retry_backoff_seconds * (2**attempt)
+        jitter = secrets.SystemRandom().uniform(0, self._config.retry_jitter_seconds)
+        return min(base + jitter, 30.0)
+
+    def download_product(
+        self, product: str, *, destination: Path | None = None
+    ) -> ProductObservation:
         if product not in PRODUCT_SCHEMAS:
             raise AcquisitionError(f"unsupported product: {product}")
-        self._config.output_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination or self._config.output_dir
+        destination.mkdir(parents=True, exist_ok=True)
         filename = f"{product}.csv.gz"
-        final_path = self._config.output_dir / filename
+        final_path = destination / filename
         temporary_path: Path | None = None
         last_retryable: str | None = None
         try:
@@ -240,7 +244,7 @@ class CodexAcquirer:
                         if _is_retryable_status(response.status_code):
                             last_retryable = f"{product}: transient HTTP {response.status_code}"
                             if attempt < self._config.max_retries:
-                                time.sleep(self._config.retry_backoff_seconds * (2**attempt))
+                                time.sleep(self._backoff_seconds(attempt))
                                 continue
                             raise _safe_error(last_retryable)
                         if response.status_code >= 400:
@@ -250,7 +254,7 @@ class CodexAcquirer:
                             raise _safe_error(f"{product}: unexpected content type")
                         with tempfile.NamedTemporaryFile(
                             mode="wb",
-                            dir=self._config.output_dir,
+                            dir=destination,
                             prefix=f".{product}.",
                             suffix=".partial",
                             delete=False,
@@ -265,14 +269,14 @@ class CodexAcquirer:
                                 decompressed = gzip_stream.read(
                                     self._config.max_decompressed_bytes + 1
                                 )
-                        except (OSError, EOFError, zlib.error) as exc:
-                            raise _safe_error(f"{product}: invalid gzip payload") from exc
+                        except (OSError, EOFError, zlib.error):
+                            raise _safe_error(f"{product}: invalid gzip payload") from None
                         if len(decompressed) > self._config.max_decompressed_bytes:
                             raise _safe_error(f"{product}: decompressed response exceeds limit")
                         try:
                             headers, rows = _read_rows(product, payload)
-                        except (ValidationError, OSError) as exc:
-                            raise _safe_error(f"{product}: schema validation failed") from exc
+                        except (ValidationError, OSError):
+                            raise _safe_error(f"{product}: schema validation failed") from None
                         temporary_path.replace(final_path)
                         temporary_path = None
                         return ProductObservation(
@@ -290,80 +294,82 @@ class CodexAcquirer:
                             generation=response.headers.get("x-goog-generation"),
                             observed_at_utc=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                         )
-                except httpx.TimeoutException as exc:
+                except httpx.TimeoutException:
                     if temporary_path is not None:
                         temporary_path.unlink(missing_ok=True)
                         temporary_path = None
                     last_retryable = f"{product}: request timed out"
                     if attempt < self._config.max_retries:
-                        time.sleep(self._config.retry_backoff_seconds * (2**attempt))
+                        time.sleep(self._backoff_seconds(attempt))
                         continue
-                    raise _safe_error(last_retryable) from exc
-                except httpx.RequestError as exc:
+                    raise _safe_error(last_retryable) from None
+                except httpx.RequestError:
                     if temporary_path is not None:
                         temporary_path.unlink(missing_ok=True)
                         temporary_path = None
                     last_retryable = f"{product}: network request failed"
                     if attempt < self._config.max_retries:
-                        time.sleep(self._config.retry_backoff_seconds * (2**attempt))
+                        time.sleep(self._backoff_seconds(attempt))
                         continue
-                    raise _safe_error(last_retryable) from exc
+                    raise _safe_error(last_retryable) from None
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
         raise _safe_error(last_retryable or f"{product}: acquisition failed")
 
     def acquire_all(self) -> tuple[ProductObservation, ...]:
-        observations_list: list[ProductObservation] = []
-        try:
-            for product in PRODUCTS:
-                observations_list.append(self.download_product(product))
-        except BaseException:
-            for observation in observations_list:
-                (self._config.output_dir / observation.filename).unlink(missing_ok=True)
-            raise
-        observations = tuple(observations_list)
-        bundle = {
-            observation.product: (self._config.output_dir / observation.filename).read_bytes()
-            for observation in observations
-        }
-        report = validate_bundle(bundle)
-        if not report.valid:
-            for observation in observations:
-                (self._config.output_dir / observation.filename).unlink(missing_ok=True)
-            raise _safe_error("downloaded FAFB bundle failed cross-product validation")
-        _, connection_rows = _read_rows(
-            "connections_princeton", bundle["connections_princeton"]
-        )
-        threshold = pair_threshold(connection_rows)
-        manifest = {
-            "manifest_version": 1,
-            "data_kind": "observed",
-            "dataset": "flywire-fafb",
-            "snapshot": SNAPSHOT,
-            "portal_url": f"{PORTAL_URL}?dataset={DATASET}",
-            "resource_url_template": (
-                f"{RESOURCE_URL}?data_product={{product}}&dataset={DATASET}"
-                "&api_token=<redacted>"
-            ),
-            "license": LICENSE,
-            "citations": list(CITATIONS),
-            "importer_commit": self._config.importer_commit,
-            "validation": {
-                "valid": report.valid,
-                "source_rows_below_five": report.products[
-                    "connections_princeton"
-                ].source_rows_below_five,
-                "pairs_below_five": sum(
-                    total < 5 for total in threshold.pair_totals.values()
+        output_dir = self._config.output_dir
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".fafb-v783-staging-", dir=output_dir.parent
+        ) as staging_name:
+            staging = Path(staging_name)
+            observations = tuple(
+                self.download_product(product, destination=staging) for product in PRODUCTS
+            )
+            bundle = {
+                observation.product: (staging / observation.filename).read_bytes()
+                for observation in observations
+            }
+            report = validate_bundle(bundle)
+            if not report.valid:
+                raise _safe_error("downloaded FAFB bundle failed cross-product validation")
+            _, connection_rows = _read_rows(
+                "connections_princeton", bundle["connections_princeton"]
+            )
+            threshold = pair_threshold(connection_rows)
+            manifest = {
+                "manifest_version": 1,
+                "data_kind": "observed",
+                "dataset": "flywire-fafb",
+                "snapshot": SNAPSHOT,
+                "portal_url": f"{PORTAL_URL}?dataset={DATASET}",
+                "resource_url_template": (
+                    f"{RESOURCE_URL}?data_product={{product}}&dataset={DATASET}"
+                    "&api_token=<redacted>"
                 ),
-                "threshold_policy": "pair-level-sum-across-neuropils",
-                "threshold_synapses": threshold.threshold,
-            },
-            "products": [observation.__dict__ for observation in observations],
-        }
-        _atomic_write_bytes(self._config.output_dir / "manifest.json", manifest_bytes(manifest))
-        return observations
+                "license": LICENSE,
+                "citations": list(CITATIONS),
+                "importer_commit": self._config.importer_commit,
+                "validation": {
+                    "valid": report.valid,
+                    "source_rows_below_five": report.products[
+                        "connections_princeton"
+                    ].source_rows_below_five,
+                    "pairs_below_five": sum(
+                        total < 5 for total in threshold.pair_totals.values()
+                    ),
+                    "threshold_policy": "pair-level-sum-across-neuropils",
+                    "threshold_synapses": threshold.threshold,
+                },
+                "products": [observation.__dict__ for observation in observations],
+            }
+            _atomic_write_bytes(staging / "manifest.json", manifest_bytes(manifest))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for observation in observations:
+                (staging / observation.filename).replace(output_dir / observation.filename)
+            (staging / "manifest.json").replace(output_dir / "manifest.json")
+            return observations
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             importer_commit=_current_importer_commit(),
         )
         with CodexAcquirer(token, config) as acquirer:
-            acquirer.inspect_portal()
+            acquirer.discover_inventory()
             observations = acquirer.acquire_all()
         print(json.dumps([observation.__dict__ for observation in observations], sort_keys=True))
         return 0

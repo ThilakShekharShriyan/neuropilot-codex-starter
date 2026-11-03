@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import traceback
 from pathlib import Path
 
 import httpx
@@ -22,7 +23,9 @@ def _client(handler):
 
 
 def _config(tmp_path: Path, **kwargs) -> AcquisitionConfig:
-    return AcquisitionConfig(output_dir=tmp_path, retry_backoff_seconds=0, **kwargs)
+    return AcquisitionConfig(
+        output_dir=tmp_path, retry_backoff_seconds=0, retry_jitter_seconds=0, **kwargs
+    )
 
 
 def test_missing_token_fails_before_network(tmp_path: Path) -> None:
@@ -129,7 +132,25 @@ def test_timeout_cleans_partial_file(tmp_path: Path) -> None:
         with pytest.raises(AcquisitionError, match="timed out") as failure:
             acquirer.download_product("neurons")
     assert "secret-token" not in str(failure.value)
+    assert "api_token=" not in traceback.format_exc()
     assert not list(tmp_path.iterdir())
+
+
+def test_connection_failure_traceback_is_credential_free(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            "failed https://codex.flywire.ai/api/download_resource?api_token=secret-token",
+            request=request,
+        )
+
+    with CodexAcquirer(
+        "secret-token", _config(tmp_path, max_retries=1), client=_client(handler)
+    ) as acquirer:
+        with pytest.raises(AcquisitionError, match="network request failed"):
+            acquirer.download_product("neurons")
+        formatted = traceback.format_exc()
+    assert "secret-token" not in formatted
+    assert "api_token=" not in formatted
 
 
 def test_interrupted_transfer_cleans_partial_file(tmp_path: Path) -> None:
@@ -216,15 +237,15 @@ def test_unexpected_content_type_and_schema_are_rejected(tmp_path: Path) -> None
             acquirer.download_product("neurons")
 
 
-def test_portal_inventory_must_expose_all_products(tmp_path: Path) -> None:
-    def missing_inventory(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"neurons classification", request=request)
+def test_inventory_discovery_fails_closed_without_supported_mechanism(tmp_path: Path) -> None:
+    def unexpected_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("inventory discovery must not scrape the portal")
 
     with CodexAcquirer(
-        "secret-token", _config(tmp_path), client=_client(missing_inventory)
+        "secret-token", _config(tmp_path), client=_client(unexpected_network)
     ) as acquirer:
-        with pytest.raises(AcquisitionError, match="inventory"):
-            acquirer.inspect_portal()
+        with pytest.raises(AcquisitionError, match="no supported authenticated"):
+            acquirer.discover_inventory()
 
 
 def test_acquire_all_writes_token_free_manifest_and_all_products(tmp_path: Path) -> None:
@@ -268,6 +289,55 @@ def test_bundle_validation_failure_removes_previously_finalized_products(tmp_pat
         with pytest.raises(AcquisitionError):
             acquirer.acquire_all()
     assert not list(tmp_path.iterdir())
+
+
+def test_staging_failure_preserves_preexisting_output(tmp_path: Path) -> None:
+    existing = tmp_path / "neurons.csv.gz"
+    existing.write_bytes(b"previous-valid-output")
+    bundle = synthetic_bundle()
+    bundle["connections_princeton"] = b"invalid gzip"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        product = request.url.params["data_product"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip"},
+            content=bundle[product],
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(AcquisitionError):
+            acquirer.acquire_all()
+    assert existing.read_bytes() == b"previous-valid-output"
+    assert not list(tmp_path.glob(".fafb-v783-staging-*"))
+
+
+def test_manifest_write_failure_preserves_preexisting_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = tmp_path / "neurons.csv.gz"
+    existing.write_bytes(b"previous-valid-output")
+    bundle = synthetic_bundle()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        product = request.url.params["data_product"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip"},
+            content=bundle[product],
+            request=request,
+        )
+
+    def fail_manifest(destination: Path, payload: bytes) -> None:
+        raise OSError("manifest write failed")
+
+    monkeypatch.setattr("neuropilot_core.acquisition._atomic_write_bytes", fail_manifest)
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        with pytest.raises(OSError, match="manifest write failed"):
+            acquirer.acquire_all()
+    assert existing.read_bytes() == b"previous-valid-output"
+    assert not list(tmp_path.glob(".fafb-v783-staging-*"))
 
 
 def test_manifest_serialization_is_deterministic_and_token_free() -> None:
