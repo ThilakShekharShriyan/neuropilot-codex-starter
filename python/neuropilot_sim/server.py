@@ -34,6 +34,9 @@ class SimulationService:
         self.status = "live"
         self.step_count = 0
         self.last_step_latency_ms: float | None = None
+        self.reset_count = 0
+        self.request_count = 0
+        self.error_count = 0
 
     def _payload(self, state: FlyState) -> dict[str, Any]:
         payload = _state_payload(state)
@@ -57,6 +60,7 @@ class SimulationService:
             self.status = "live"
             self.step_count = 0
             self.last_step_latency_ms = None
+            self.reset_count += 1
             return self._payload(state)
 
     def step(self, control: list[float] | None) -> dict[str, Any]:
@@ -71,6 +75,19 @@ class SimulationService:
         with self.lock:
             self.simulation.close()
             self.status = "closed"
+
+    def metrics(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "data_kind": "simulated-live",
+                "session_id": self.session_id,
+                "status": self.status,
+                "request_count": self.request_count,
+                "error_count": self.error_count,
+                "reset_count": self.reset_count,
+                "step_count": self.step_count,
+                "last_step_latency_ms": self.last_step_latency_ms,
+            }
 
 
 def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
@@ -100,6 +117,7 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
             return value
 
         def do_GET(self) -> None:  # noqa: N802
+            service.request_count += 1
             if self.path == "/health":
                 self._send(200, {"status": "ok", "data_kind": "simulated-live"})
                 return
@@ -112,9 +130,13 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                         {"code": "simulation_closed", "message": "simulation is closed"},
                     )
                 return
+            if self.path == "/api/v1/simulation/metrics":
+                self._send(200, service.metrics())
+                return
             self._send(404, {"code": "not_found", "message": "endpoint not found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            service.request_count += 1
             try:
                 body = self._json_body()
                 if self.path == "/api/v1/simulation/reset":
@@ -146,8 +168,10 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:
+                service.error_count += 1
                 self._send(400, {"code": "invalid_request", "message": str(exc)})
             except RuntimeError:
+                service.error_count += 1
                 self._send(409, {"code": "simulation_closed", "message": "simulation is closed"})
 
         def log_message(self, format: str, *args: object) -> None:

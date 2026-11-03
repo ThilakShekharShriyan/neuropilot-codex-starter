@@ -63,6 +63,9 @@ cargo run -p neuro-api --example m2_server -- data/normalized/fafb_v783 8788
 
 The dashboard talks only to the Rust origin. Simulation responses carry
 `data_kind: "simulated-live"`; they are never presented as connectome activity.
+`GET /api/v1/simulation/metrics` exposes bounded request, error, reset, step,
+and last-latency counters for the current session. Counters are telemetry, not
+scientific measurements, and reset with a new Python service session.
 
 On the local Mac smoke run (30 sequential reset/step requests through Python →
 Rust, one physics step per request), observed round-trip latency was p50

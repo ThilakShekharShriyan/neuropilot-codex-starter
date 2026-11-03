@@ -47,7 +47,7 @@ Do not rewrite FlyGym or MuJoCo in Rust. Integrate the scientific simulator thro
    ```bash
    PYTHONPATH=python uv run --project . python -m neuropilot_sim.server --port 8790
    ```
-   It exposes `/health`, `/api/v1/simulation/state`, and bounded reset/step/close
+   It exposes `/health`, `/api/v1/simulation/state`, `/api/v1/simulation/metrics`, and bounded reset/step/close
    endpoints on loopback only.
    To run the Rust gateway in front of it:
    ```bash

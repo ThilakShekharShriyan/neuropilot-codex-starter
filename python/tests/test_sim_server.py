@@ -37,6 +37,11 @@ def test_loopback_service_lifecycle() -> None:
             assert state["time"] > 0.0
             assert state["step_count"] == 1
             assert state["step_latency_ms"] >= 0.0
+        with urllib.request.urlopen(f"{base}/api/v1/simulation/metrics") as response:
+            metrics = json.loads(response.read())
+            assert metrics["data_kind"] == "simulated-live"
+            assert metrics["step_count"] == 1
+            assert metrics["request_count"] >= 3
     finally:
         server.shutdown()
         server.server_close()

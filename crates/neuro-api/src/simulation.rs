@@ -22,6 +22,18 @@ pub struct SimulationState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SimulationMetrics {
+    pub data_kind: String,
+    pub session_id: String,
+    pub status: String,
+    pub request_count: u64,
+    pub error_count: u64,
+    pub reset_count: u64,
+    pub step_count: u64,
+    pub last_step_latency_ms: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StepRequest {
     pub control: Option<Vec<f64>>,
 }
@@ -78,6 +90,32 @@ impl SimulationGateway {
     pub async fn state(&self) -> Result<SimulationState, GatewayError> {
         self.request(self.client.get(self.url("/api/v1/simulation/state")))
             .await
+    }
+
+    pub async fn metrics(&self) -> Result<SimulationMetrics, GatewayError> {
+        let response = self
+            .client
+            .get(self.url("/api/v1/simulation/metrics"))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        if !response.status().is_success() {
+            return Err(GatewayError::Remote(response.status()));
+        }
+        let metrics = response
+            .json::<SimulationMetrics>()
+            .await
+            .map_err(|_| GatewayError::InvalidResponse)?;
+        if metrics.data_kind != "simulated-live"
+            || metrics.session_id.is_empty()
+            || !matches!(metrics.status.as_str(), "live" | "closed")
+            || metrics
+                .last_step_latency_ms
+                .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(GatewayError::InvalidResponse);
+        }
+        Ok(metrics)
     }
 
     pub async fn reset(&self) -> Result<SimulationState, GatewayError> {
