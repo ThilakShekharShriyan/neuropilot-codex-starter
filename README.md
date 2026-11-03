@@ -34,6 +34,15 @@ Do not rewrite FlyGym or MuJoCo in Rust. Integrate the scientific simulator thro
    This fixture is not FAFB and must not be used as biological evidence. The
    dashboard labels graph coordinates as abstract layout coordinates and never
    treats them as anatomy.
+   After the approved FAFB acquisition, normalize and serve the observed
+   artifact locally:
+   ```bash
+   PYTHONPATH=python uv run --project . python -m neuropilot_core.normalize
+   cargo run -p neuro-api --example real_server -- data/normalized/fafb_v783 8787
+   pnpm --dir apps/dashboard dev
+   ```
+   The real-data server is loopback-only; the browser receives only bounded
+   JSON responses and never receives the Codex token.
 5. Ask Codex to inspect the repository and propose a minimal Milestone 0 implementation:
    > Read AGENTS.md, plan.md, skills.md. Do not implement future milestones. Inspect my machine and repository, report missing prerequisites, and propose the smallest verified Milestone 0.
 6. Work milestone by milestone. Do not advance until the acceptance checklist is met.

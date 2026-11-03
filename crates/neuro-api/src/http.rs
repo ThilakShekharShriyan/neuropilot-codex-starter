@@ -113,14 +113,17 @@ async fn local_boundary(request: Request<axum::body::Body>, next: Next) -> Respo
                         | "127.0.0.1:80"
                         | "127.0.0.1:3000"
                         | "127.0.0.1:5173"
+                        | "127.0.0.1:8787"
                         | "localhost"
                         | "localhost:80"
                         | "localhost:3000"
                         | "localhost:5173"
+                        | "localhost:8787"
                         | "[::1]"
                         | "[::1]:80"
                         | "[::1]:3000"
                         | "[::1]:5173"
+                        | "[::1]:8787"
                 )
             })
             .unwrap_or(false);

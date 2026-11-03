@@ -1,6 +1,21 @@
 # M1.1 — FAFB v783 acquisition contract research
 
-Status: research-only. No authenticated request or product download was performed.
+Status: acquisition and normalization verified locally on 2026-11-03. Raw
+products remain ignored and are not committed.
+
+Observed authenticated response metadata is recorded in the ignored raw
+manifest. The Codex resource endpoint redirected to `storage.googleapis.com`;
+the client follows only that exact HTTPS host and never forwards `api_token`.
+The product generations and modification dates differ across exports, so the
+manifest treats them as observed HTTP metadata rather than immutable release
+identity. `dataset=fafb` and the reviewed snapshot label `783` remain the
+contract identifiers; no stronger release equivalence is claimed.
+
+The verified acquisition contained 139,255 neuron rows, 139,255
+classification rows, 138,327 consolidated cell-type rows, and 5,342,446
+connection rows. Pair-level threshold evaluation found 0 pairs below five
+synapses and 1,588,394 individual source rows below five; the normalized
+artifact applies the pair-level threshold and records its own SHA-256.
 
 Access date: 2026-11-02 America/Los_Angeles (2026-11-03 UTC as shown by the Codex response headers).
 

@@ -1,8 +1,8 @@
 # M1 architecture: real FAFB v783 explorer
 
-Status: staged M1 implementation. Real FAFB acquisition remains gated by the
-documented Codex inventory limitation and user review; no biological data is
-bundled in the repository.
+Status: M1 acquisition and local artifact integration implemented. Raw and
+normalized biological data remain local ignored artifacts; no biological data
+is bundled in the repository.
 
 ## Boundaries
 

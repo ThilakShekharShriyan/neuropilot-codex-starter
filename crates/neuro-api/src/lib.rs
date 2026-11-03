@@ -5,7 +5,10 @@
 //! acquisition and credentials remain outside Rust.
 
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher};
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -110,6 +113,84 @@ pub struct GraphService {
 }
 
 impl GraphService {
+    /// Load the deterministic JSONL artifact produced by the Python normalizer.
+    /// The loader is intentionally read-only and accepts only the expected files.
+    pub fn from_normalized_dir(
+        directory: impl AsRef<Path>,
+        limits: ServiceLimits,
+    ) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Manifest {
+            dataset: String,
+            snapshot: String,
+            artifact_hash: String,
+        }
+        #[derive(Deserialize)]
+        struct NormalizedNeuron {
+            root_id: String,
+            primary_type: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct NormalizedEdge {
+            pre_root_id: String,
+            post_root_id: String,
+            neuropil: String,
+            synapse_count: u64,
+            nt_type: Option<String>,
+        }
+
+        let directory = directory.as_ref();
+        let manifest: Manifest = serde_json::from_reader(
+            File::open(directory.join("manifest.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let neurons = BufReader::new(
+            File::open(directory.join("neurons.jsonl")).map_err(|error| error.to_string())?,
+        )
+        .lines()
+        .map(|line| {
+            let line = line.map_err(|error| error.to_string())?;
+            let neuron: NormalizedNeuron =
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            Ok(Neuron {
+                root_id: neuron.root_id,
+                primary_type: neuron.primary_type,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+        let edges = BufReader::new(
+            File::open(directory.join("edges.jsonl")).map_err(|error| error.to_string())?,
+        )
+        .lines()
+        .map(|line| {
+            let line = line.map_err(|error| error.to_string())?;
+            let edge: NormalizedEdge =
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            Ok(Edge {
+                pre_root_id: edge.pre_root_id,
+                post_root_id: edge.post_root_id,
+                neuropil: edge.neuropil,
+                synapse_count: edge.synapse_count,
+                nt_type: edge.nt_type,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+        let provenance_ref = format!("manifest-sha256:{}", manifest.artifact_hash);
+        Self::new(
+            DatasetRef {
+                id: manifest.dataset,
+                snapshot: manifest.snapshot,
+            },
+            1,
+            manifest.artifact_hash,
+            provenance_ref,
+            neurons,
+            edges,
+            limits,
+        )
+        .map_err(|error| format!("normalized artifact is invalid: {error:?}"))
+    }
+
     pub fn neuron(&self, root_id: &str) -> Result<Neuron, QueryError> {
         if !is_ascii_root_id(root_id) {
             return Err(QueryError::InvalidRootId);

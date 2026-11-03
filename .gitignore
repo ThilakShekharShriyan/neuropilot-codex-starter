@@ -14,6 +14,7 @@ target/
 data/raw/**
 data/interim/**
 data/processed/**
+data/normalized/**
 artifacts/**
 *.pt
 *.pth

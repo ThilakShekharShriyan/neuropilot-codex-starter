@@ -18,7 +18,36 @@ async function getJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-function GraphCanvas({ nodes, edges }: { nodes: Neuron[]; edges: Edge[] }) {
+function layoutGraph(nodes: Neuron[], edges: Edge[]): Map<string, THREE.Vector3> {
+  const positions = new Map(nodes.map((node, index) => [node.root_id, new THREE.Vector3(
+    Math.cos(index * 2.4) * 2.2,
+    Math.sin(index * 2.4) * 2.2,
+    ((index * 17) % 11) / 10 - 0.5,
+  )]));
+  for (let iteration = 0; iteration < 48; iteration += 1) {
+    const delta = new Map(nodes.map((node) => [node.root_id, new THREE.Vector3()]));
+    nodes.forEach((left) => nodes.forEach((right) => {
+      if (left.root_id === right.root_id) return;
+      const a = positions.get(left.root_id)!;
+      const b = positions.get(right.root_id)!;
+      const direction = a.clone().sub(b);
+      const distance = Math.max(direction.length(), 0.08);
+      delta.get(left.root_id)!.add(direction.normalize().multiplyScalar(0.018 / distance));
+    }));
+    edges.forEach((edge) => {
+      const a = positions.get(edge.pre_root_id);
+      const b = positions.get(edge.post_root_id);
+      if (!a || !b) return;
+      const direction = b.clone().sub(a);
+      delta.get(edge.pre_root_id)!.add(direction.multiplyScalar(0.002));
+      delta.get(edge.post_root_id)!.sub(direction.multiplyScalar(0.002));
+    });
+    nodes.forEach((node) => positions.get(node.root_id)!.add(delta.get(node.root_id)!));
+  }
+  return positions;
+}
+
+function GraphCanvas({ nodes, edges, selectedId }: { nodes: Neuron[]; edges: Edge[]; selectedId: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -31,12 +60,10 @@ function GraphCanvas({ nodes, edges }: { nodes: Neuron[]; edges: Edge[] }) {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     const group = new THREE.Group();
-    const positions = new Map<string, THREE.Vector3>();
-    nodes.forEach((node, index) => {
-      const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
-      const position = new THREE.Vector3(Math.cos(angle) * 2.2, Math.sin(angle) * 2.2, 0);
-      positions.set(node.root_id, position);
-      const material = new THREE.MeshBasicMaterial({ color: index === 0 ? "#f4c95d" : "#78b7ff" });
+    const positions = layoutGraph(nodes, edges);
+    nodes.forEach((node) => {
+      const position = positions.get(node.root_id)!;
+      const material = new THREE.MeshBasicMaterial({ color: node.root_id === selectedId ? "#f4c95d" : (node.primary_type ? "#78b7ff" : "#7e8798") });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), material);
       mesh.position.copy(position);
       group.add(mesh);
@@ -46,7 +73,8 @@ function GraphCanvas({ nodes, edges }: { nodes: Neuron[]; edges: Edge[] }) {
       const to = positions.get(edge.post_root_id);
       if (!from || !to) return;
       const geometry = new THREE.BufferGeometry().setFromPoints([from, to]);
-      group.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: "#b8c6df" })));
+      const color = edge.pre_root_id === selectedId ? "#ff9f68" : "#7cb7ff";
+      group.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color })));
     });
     scene.add(group);
     const resize = () => {
@@ -80,7 +108,7 @@ function GraphCanvas({ nodes, edges }: { nodes: Neuron[]; edges: Edge[] }) {
       });
       renderer.dispose();
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, selectedId]);
 
   return <canvas ref={canvasRef} className="graph-canvas" aria-label="Abstract graph layout" />;
 }
@@ -138,7 +166,7 @@ function App() {
       {error && <p className="notice error" role="alert">{error}</p>}
       {matches.length > 0 && <section className="matches"><h2>Source matches</h2>{matches.map((neuron) => <button key={neuron.root_id} onClick={() => setRootId(neuron.root_id)}>{neuron.root_id} · {neuron.primary_type ?? "unannotated"}</button>)}</section>}
       <section className="graph-panel"><div className="panel-heading"><div><span className="eyebrow">DIRECTED SUBGRAPH</span><h2>{connections ? `${connections.edges.length} edges` : "Awaiting a local artifact"}</h2></div><span className="legend"><i className="dot selected-dot" /> selected <i className="dot edge-dot" /> edge weight</span></div>
-        {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Provenance: {connections.provenance_ref}{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
+        {connections ? <><GraphCanvas nodes={connections.nodes} edges={connections.edges} selectedId={rootId} /><p className="provenance">Graph layout coordinates are abstract, not anatomical. Orange edges are outgoing; blue edges are incoming. Provenance: {connections.provenance_ref}{connections.truncated ? " · graph cap applied" : ""}</p></> : <div className="empty-state"><strong>No graph loaded</strong><span>Run the local Rust service with a normalized artifact to inspect real FAFB records.</span></div>}
       </section>
       <footer>Observed records only · no biological coordinates · credentials never enter the browser</footer>
     </main>
