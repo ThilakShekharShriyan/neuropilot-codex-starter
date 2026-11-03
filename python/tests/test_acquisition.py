@@ -91,6 +91,35 @@ def test_redirects_are_rejected_without_following(tmp_path: Path) -> None:
     assert "secret-token" not in str(failure.value)
 
 
+def test_codex_storage_redirect_is_followed_without_forwarding_token(tmp_path: Path) -> None:
+    payload = synthetic_bundle()["neurons"]
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "https://storage.googleapis.com/flywire-data/neurons.csv.gz"
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/gzip"},
+            content=payload,
+            request=request,
+        )
+
+    with CodexAcquirer("secret-token", _config(tmp_path), client=_client(handler)) as acquirer:
+        acquirer.download_product("neurons")
+
+    assert len(calls) == 2
+    assert calls[0].url.params["api_token"] == "secret-token"
+    assert "api_token" not in calls[1].url.query.decode()
+
+
 def test_transient_429_retries_then_succeeds(tmp_path: Path) -> None:
     payload = synthetic_bundle()["neurons"]
     calls = 0

@@ -8,6 +8,7 @@ or logs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
 import io
@@ -25,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
+from urllib.parse import urlparse
 
 import httpx
 
@@ -50,6 +52,7 @@ CITATIONS = (
 DEFAULT_MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 TOKEN_PATTERN = re.compile(r"(?i)(api_token=)[^&\s]+")
+REDIRECT_HOST = "storage.googleapis.com"
 LOGGER = logging.getLogger(__name__)
 VERSIONS_DIRNAME = "versions"
 CURRENT_POINTER = "CURRENT.json"
@@ -112,6 +115,16 @@ def _content_type_allowed(value: str | None) -> bool:
         "text/csv",
         "text/plain",
     }
+
+
+def _validated_storage_redirect(location: str | None) -> str:
+    """Allow Codex's documented storage redirect without forwarding credentials."""
+    if not location:
+        raise _safe_error("unexpected redirect")
+    parsed = urlparse(location)
+    if parsed.scheme != "https" or parsed.hostname != REDIRECT_HOST or parsed.query:
+        raise _safe_error("unexpected redirect")
+    return location
 
 
 def _write_stream(stream: BinaryIO, destination: Path, limit: int) -> tuple[str, int]:
@@ -310,15 +323,25 @@ class CodexAcquirer:
         try:
             for attempt in range(self._config.max_retries + 1):
                 try:
-                    with self._client.stream(
-                        "GET",
-                        RESOURCE_URL,
-                        params={
-                            "data_product": product,
-                            "dataset": DATASET,
-                            "api_token": self._token,
-                        },
-                    ) as response:
+                    with contextlib.ExitStack() as stack:
+                        response = stack.enter_context(
+                            self._client.stream(
+                                "GET",
+                                RESOURCE_URL,
+                                params={
+                                    "data_product": product,
+                                    "dataset": DATASET,
+                                    "api_token": self._token,
+                                },
+                            )
+                        )
+                        if response.is_redirect or 300 <= response.status_code < 400:
+                            redirect_url = _validated_storage_redirect(
+                                response.headers.get("location")
+                            )
+                            response = stack.enter_context(
+                                self._client.stream("GET", redirect_url)
+                            )
                         if response.is_redirect or 300 <= response.status_code < 400:
                             raise _safe_error(f"{product}: unexpected redirect")
                         if response.status_code in (401, 403):

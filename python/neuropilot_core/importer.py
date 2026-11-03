@@ -20,7 +20,10 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MAX_UINT64 = 2**64 - 1
-MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
+# The approved FAFB v783 connection export is substantially larger than the
+# synthetic fixtures. Keep a finite expansion ceiling while accommodating the
+# observed static product (roughly 0.5 GiB uncompressed, with headroom).
+MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 ASCII_DECIMAL = re.compile(r"[0-9]+\Z")
 PORTAL_URL = "https://codex.flywire.ai/api/download?dataset=fafb"
 RESOURCE_URL_TEMPLATE = (
