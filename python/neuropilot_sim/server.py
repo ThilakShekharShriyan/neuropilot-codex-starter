@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import secrets
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,7 +142,16 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
         def do_GET(self) -> None:  # noqa: N802
             service.record_request()
             if self.path == "/health":
-                self._send(200, {"status": "ok", "data_kind": "simulated-live"})
+                metrics = service.metrics()
+                self._send(
+                    200,
+                    {
+                        "status": "ok" if metrics["status"] == "live" else "closed",
+                        "data_kind": "simulated-live",
+                        "session_id": metrics["session_id"],
+                        "simulation_status": metrics["status"],
+                    },
+                )
                 return
             if self.path == "/api/v1/simulation/state":
                 try:
@@ -213,10 +223,18 @@ def main() -> int:
     with FlySimulation() as simulation:
         server = make_server(SimulationService(simulation), args.port)
         print(f"simulation service listening on http://127.0.0.1:{args.port}", flush=True)
+        shutdown_requested = threading.Event()
+
+        def request_shutdown(signum: int, frame: object) -> None:
+            del signum, frame
+            if not shutdown_requested.is_set():
+                shutdown_requested.set()
+                server.shutdown()
+
+        signal.signal(signal.SIGINT, request_shutdown)
+        signal.signal(signal.SIGTERM, request_shutdown)
         try:
             server.serve_forever()
-        except KeyboardInterrupt:
-            pass
         finally:
             server.server_close()
     return 0

@@ -20,7 +20,9 @@ def test_loopback_service_lifecycle() -> None:
     try:
         with urllib.request.urlopen(f"{base}/health") as response:
             assert response.status == 200
-            assert json.loads(response.read())["data_kind"] == "simulated-live"
+            health = json.loads(response.read())
+            assert health["data_kind"] == "simulated-live"
+            assert health["simulation_status"] == "live"
         request = urllib.request.Request(
             f"{base}/api/v1/simulation/reset", data=b"{}", method="POST"
         )
