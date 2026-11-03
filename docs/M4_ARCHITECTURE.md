@@ -21,7 +21,7 @@ device. M4 must not imply that a user command is a biological motor command.
 
 ```text
 Keyboard/gamepad/browser event
-        │ bounded command + session_id
+        │ bounded command + control_session_id
         ▼
 React dashboard ──localhost HTTP──> Rust gateway
                                       │ validated command queue
@@ -45,7 +45,7 @@ oversized arrays, and stale session IDs before forwarding anything to Python.
 ```json
 {
   "schema_version": 1,
-  "session_id": "opaque-current-session",
+  "control_session_id": "opaque-current-session",
   "sequence": 42,
   "issued_at_ms": 1730000000000,
   "control": [0.0, 0.25, -0.25],
@@ -56,10 +56,10 @@ oversized arrays, and stale session IDs before forwarding anything to Python.
 
 Contract rules:
 
-- `session_id` is required and must match the currently live Python session;
-  commands from a prior or unknown session are rejected without forwarding.
+- `control_session_id` is required and identifies the Rust control session; commands
+  from a prior or unknown session are rejected without forwarding.
 - `sequence` is a client-provided monotonically increasing value. Duplicate or
-  older values may be coalesced/rejected and are counted as dropped events.
+  older values are rejected and counted as stale events.
 - `issued_at_ms` is diagnostic metadata only. The gateway uses its own monotonic
   receive clock for freshness and does not trust a browser wall clock.
 - `source` is an enum (`keyboard` or `gamepad` in this slice), retained for
@@ -74,9 +74,54 @@ Contract rules:
 - Control messages never contain neuron IDs, connectome edges, anatomical
   coordinates, or claims about neural activity.
 
-The exact active-leg actuator length is discovered from the validated simulator
-session, not guessed in the frontend. A mismatch is an `invalid_control`
-failure, not an opportunity to pad or truncate silently.
+The browser-facing surface is intentionally smaller than the raw active-leg
+actuator vector. It exposes three named engineering channels: `forward`,
+`lateral`, and `turn`, each bounded to `[-1.0, 1.0]` before the `0.25`
+control-authority bound is applied. Rust owns a versioned, explicit table that
+expands these channels to the simulator actuator vector. This is an engineering
+mapping, not a biological or anatomical mapping, and it must never be inferred
+from neuron labels or connectome edges. The exact active-leg actuator length is
+discovered from the validated simulator session, not guessed in the frontend. A
+mismatch is an `invalid_control` failure, not an opportunity to pad or truncate
+silently. Keyboard keys and gamepad axes produce the same three-channel
+contract.
+
+### Session identity and reset semantics
+
+M4 uses two distinct opaque identifiers:
+
+- `control_session_id` identifies a Rust gateway control session and appears in
+  every control request, response, error, and telemetry record;
+- `simulator_session_id` is the Python service's M2 session ID for the underlying
+  FlyGym process/session.
+
+Creating a control session, reconnecting, or resetting rotates the
+`control_session_id` and clears its sequence window. M4 reset calls the existing
+Python reset lifecycle, which preserves the M2 `simulator_session_id` while
+returning a fresh baseline state. A Python restart/reconnect creates a new
+`simulator_session_id` as well as a new control session. Both IDs are returned
+so this distinction is explicit; no request from an old control session is
+accepted even when the Python reset ID is unchanged.
+
+### Sequence semantics
+
+Sequences are unsigned integers beginning at `1` for each new control session.
+Gaps are allowed, but only strictly increasing values are accepted. Duplicates,
+older values, and out-of-order values are rejected with `stale_sequence` and
+never forwarded. The highest accepted sequence remains in force across pause
+and resume. Reset, reconnect, Python restart, and gateway restart create a new
+control session and reset the sequence watermark to zero. Stop clears queued
+active commands but does not make old sequence numbers valid; explicit reset is
+required before a new sequence window exists. Gaps and rejections are counted.
+
+### Watchdog refresh semantics
+
+The watchdog is refreshed only by an accepted, strictly increasing `active`
+control command or an explicit heartbeat for the current control session.
+Neutral commands, rejected/duplicate/queue-dropped commands, browser polling,
+pause, and telemetry reads do not refresh it. Heartbeats carry no actuator
+values and cannot create motion. The watchdog is armed only in `ACTIVE` and is
+disarmed in `PAUSED`, `STOPPED`, and `DISCONNECTED`.
 
 ## Lifecycle and safety state machine
 
@@ -100,11 +145,12 @@ Safety semantics:
   commands, sends neutral once when possible, and requires an explicit reset
   before resume. A failed neutral send still leaves the gateway fail-safe and
   increments a stop-delivery error counter.
-- **Reset:** clears the watchdog, sequence window, bounded queue, and session
-  control state; it does not reuse a stale session ID. The simulator reset
-  endpoint establishes the new baseline state.
-- **Watchdog:** uses a monotonic deadline. If no accepted control heartbeat or
-  command arrives within the configured interval (initial proposal: 250 ms),
+- **Reset:** rotates the gateway `control_session_id`, clears the sequence
+  window and bounded queue, and calls Python reset. The Python
+  `simulator_session_id` is preserved by this operation; reconnect after a
+  Python restart creates a new simulator ID.
+- **Watchdog:** uses a monotonic deadline. If no accepted active command or
+  explicit heartbeat arrives within the configured interval (initial proposal: 250 ms),
   the gateway drops pending active commands, sends neutral once, increments
   `watchdog_trips`, and transitions to `STOPPED`.
 - **Disconnect:** on timeout, refusal, malformed response, or remote close, the
@@ -143,8 +189,9 @@ until an implementation is approved.
 
 | Method/path | Purpose | Key response/error semantics |
 |---|---|---|
-| `POST /api/v1/control/session` | Start or attach to a control session | Returns gateway `session_id`, state `paused`, limits, and watchdog config |
+| `POST /api/v1/control/session` | Start or attach to a control session | Returns gateway `control_session_id`, simulator ID, state `paused`, limits, and watchdog config |
 | `POST /api/v1/control/input` | Submit one bounded keyboard/gamepad command | `202` accepted/coalesced; `400` invalid; `409` stale session/state; `429` bounded queue policy if lifecycle priority cannot be preserved |
+| `POST /api/v1/control/heartbeat` | Refresh watchdog without actuator values | `202` accepted for active matching session; `409` if paused/stopped/stale |
 | `POST /api/v1/control/pause` | Pause and neutralize | Idempotent; state `paused` |
 | `POST /api/v1/control/resume` | Resume after explicit safety checks | Requires live matching simulator session; state `active` |
 | `POST /api/v1/control/stop` | Emergency stop | Idempotent; state `stopped`; clears active queue |
@@ -157,11 +204,39 @@ browser unresponsive. It acknowledges acceptance/coalescing and reports the
 event's gateway receive/forward timestamps through bounded telemetry. State
 polling remains independent from input submission.
 
+### Versioned control error envelope
+
+Every non-success control response uses one JSON envelope and never returns a
+Python traceback or raw transport exception:
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "code": "stale_sequence",
+    "message": "control sequence is not newer than the accepted sequence",
+    "control_session_id": "opaque-current-session",
+    "sequence": 41,
+    "retryable": false
+  }
+}
+```
+
+Stable first-slice codes are `invalid_control`, `stale_session`,
+`stale_sequence`, `control_paused`, `watchdog_stop`, `queue_dropped`,
+`simulator_unavailable`, `simulator_closed`, `invalid_simulator_response`, and
+`shutdown`. `watchdog_stop` is emitted when the gateway transitions to
+`STOPPED`; `queue_dropped` is emitted only as a per-event result when bounded
+backpressure discards an active event. HTTP classes are stable (`400` malformed
+input, `409` lifecycle/session conflict, `503` simulator unavailable, `410`
+closed session, `429` queue policy rejection); clients use `error.code` for
+behavior. Messages are concise and non-sensitive.
+
 ## Telemetry contract
 
 Every control session exposes bounded counters and timing fields:
 
-- `session_id`, lifecycle state, simulator session ID;
+- `control_session_id`, lifecycle state, and `simulator_session_id`;
 - end-to-end input latency: browser-issued timestamp is diagnostic, while the
   gateway records receive-to-forward and forward-to-ack durations using a
   monotonic clock;
