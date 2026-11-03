@@ -8,7 +8,7 @@ import json
 import math
 import platform
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .adapter import FlySimulation, FlySimulationConfig
@@ -20,6 +20,7 @@ class ExperimentConfig:
     repetitions: int = 3
     steps: int = 50
     amplitude: float = 0.05
+    comparison_amplitudes: tuple[float, ...] = (0.025, 0.05, 0.1)
 
     def __post_init__(self) -> None:
         if self.repetitions < 2:
@@ -28,6 +29,10 @@ class ExperimentConfig:
             raise ValueError("steps must be positive")
         if not math.isfinite(self.amplitude) or self.amplitude <= 0.0:
             raise ValueError("amplitude must be finite and positive")
+        if not self.comparison_amplitudes or any(
+            not math.isfinite(value) or value <= 0.0 for value in self.comparison_amplitudes
+        ):
+            raise ValueError("comparison amplitudes must be finite and positive")
 
 
 def _metric(
@@ -70,18 +75,28 @@ def _run_condition(config: ExperimentConfig, seed: int, perturb: bool) -> dict[s
         return metrics
 
 
-def _summary(rows: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+def _summary(rows: list[dict[str, float]]) -> dict[str, dict[str, float | int]]:
     metric_names = tuple(rows[0])
     return {
-        name: {
-            "mean": statistics.fmean(row[name] for row in rows),
-            "sample_stddev": statistics.stdev(row[name] for row in rows),
-        }
+        name: _uncertainty([row[name] for row in rows])
         for name in metric_names
     }
 
 
-def run_experiment(config: ExperimentConfig) -> dict[str, object]:
+def _uncertainty(values: list[float]) -> dict[str, float | int]:
+    mean = statistics.fmean(values)
+    sample_stddev = statistics.stdev(values) if len(values) > 1 else 0.0
+    standard_error = sample_stddev / math.sqrt(len(values))
+    return {
+        "n": len(values),
+        "mean": mean,
+        "sample_stddev": sample_stddev,
+        "standard_error": standard_error,
+        "ci95_half_width": 1.96 * standard_error,
+    }
+
+
+def _paired_runs(config: ExperimentConfig) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
     baseline = [
         _run_condition(config, config.seed + index, False)
         for index in range(config.repetitions)
@@ -90,10 +105,34 @@ def run_experiment(config: ExperimentConfig) -> dict[str, object]:
         _run_condition(config, config.seed + index, True)
         for index in range(config.repetitions)
     ]
+    return baseline, perturbation
+
+
+def run_experiment(config: ExperimentConfig) -> dict[str, object]:
+    baseline, perturbation = _paired_runs(config)
     deltas = [
         {name: perturb[name] - base[name] for name in base}
         for base, perturb in zip(baseline, perturbation, strict=True)
     ]
+    comparison = []
+    for amplitude in config.comparison_amplitudes:
+        comparison_config = replace(config, amplitude=amplitude)
+        comparison_baseline, comparison_perturbation = _paired_runs(comparison_config)
+        comparison_deltas = [
+            {name: perturb[name] - base[name] for name in base}
+            for base, perturb in zip(
+                comparison_baseline, comparison_perturbation, strict=True
+            )
+        ]
+        comparison.append(
+            {
+                "amplitude": amplitude,
+                "paired_deltas": {
+                    "replicates": comparison_deltas,
+                    "summary": _summary(comparison_deltas),
+                },
+            }
+        )
     return {
         "schema_version": 1,
         "data_kind": "simulated",
@@ -117,6 +156,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, object]:
             "summary": _summary(perturbation),
         },
         "paired_deltas": {"replicates": deltas, "summary": _summary(deltas)},
+        "comparison": comparison,
         "limitations": [
             "simulated biomechanics only; no neural dynamics or connectome controller",
             "short horizon and small sample count",
@@ -136,6 +176,11 @@ def main() -> int:
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--amplitude", type=float, default=0.05)
+    parser.add_argument(
+        "--comparison-amplitudes",
+        default="0.025,0.05,0.1",
+        help="comma-separated positive amplitudes for the comparison sweep",
+    )
     args = parser.parse_args()
     result = run_experiment(
         ExperimentConfig(
@@ -143,6 +188,9 @@ def main() -> int:
             repetitions=args.repetitions,
             steps=args.steps,
             amplitude=args.amplitude,
+            comparison_amplitudes=tuple(
+                float(value) for value in args.comparison_amplitudes.split(",") if value
+            ),
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
