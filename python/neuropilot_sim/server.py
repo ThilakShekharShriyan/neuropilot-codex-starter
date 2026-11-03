@@ -89,6 +89,14 @@ class SimulationService:
                 "last_step_latency_ms": self.last_step_latency_ms,
             }
 
+    def record_request(self) -> None:
+        with self.lock:
+            self.request_count += 1
+
+    def record_error(self) -> None:
+        with self.lock:
+            self.error_count += 1
+
 
 def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
@@ -117,7 +125,7 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
             return value
 
         def do_GET(self) -> None:  # noqa: N802
-            service.request_count += 1
+            service.record_request()
             if self.path == "/health":
                 self._send(200, {"status": "ok", "data_kind": "simulated-live"})
                 return
@@ -136,7 +144,7 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
             self._send(404, {"code": "not_found", "message": "endpoint not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            service.request_count += 1
+            service.record_request()
             try:
                 body = self._json_body()
                 if self.path == "/api/v1/simulation/reset":
@@ -168,10 +176,10 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:
-                service.error_count += 1
+                service.record_error()
                 self._send(400, {"code": "invalid_request", "message": str(exc)})
             except RuntimeError:
-                service.error_count += 1
+                service.record_error()
                 self._send(409, {"code": "simulation_closed", "message": "simulation is closed"})
 
         def log_message(self, format: str, *args: object) -> None:

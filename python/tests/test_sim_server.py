@@ -5,6 +5,7 @@ import math
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from neuropilot_sim import FlySimulation
 from neuropilot_sim.server import SimulationService, make_server
@@ -67,6 +68,25 @@ def test_non_finite_control_is_rejected() -> None:
             assert json.loads(error.read())["code"] == "invalid_request"
         else:
             raise AssertionError("non-finite control was accepted")
+    finally:
+        server.shutdown()
+        server.server_close()
+        service.close()
+
+
+def test_concurrent_requests_count_without_lost_increments() -> None:
+    service = SimulationService(FlySimulation())
+    server = make_server(service, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(lambda _: urllib.request.urlopen(f"{base}/health").read(), range(32)))
+        with urllib.request.urlopen(f"{base}/api/v1/simulation/metrics") as response:
+            metrics = json.loads(response.read())
+        assert metrics["request_count"] == 33
+        assert metrics["error_count"] == 0
     finally:
         server.shutdown()
         server.server_close()
