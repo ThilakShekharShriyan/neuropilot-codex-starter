@@ -49,6 +49,11 @@ pub struct SearchParams {
     pub limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct ControlSessionRequest {
+    control_session_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct NeuronResponse {
     dataset: crate::DatasetRef,
@@ -112,6 +117,16 @@ pub fn router_with_simulation(
         .route("/api/v1/control/status", get(control_status))
         .route("/api/v1/control/reset", axum::routing::post(control_reset))
         .route("/api/v1/control/input", axum::routing::post(control_input))
+        .route(
+            "/api/v1/control/resume",
+            axum::routing::post(control_resume),
+        )
+        .route("/api/v1/control/pause", axum::routing::post(control_pause))
+        .route("/api/v1/control/stop", axum::routing::post(control_stop))
+        .route(
+            "/api/v1/control/heartbeat",
+            axum::routing::post(control_heartbeat),
+        )
         .route(
             "/api/v1/simulation/reset",
             axum::routing::post(simulation_reset),
@@ -349,6 +364,60 @@ async fn control_reset(State(state): State<AppState>) -> Response {
         );
     };
     match simulation.control_reset().await {
+        Ok(value) => {
+            if let Ok(mut queue) = state.control_queue.lock() {
+                queue.reset();
+            }
+            (StatusCode::OK, Json(value)).into_response()
+        }
+        Err(error_value) => gateway_error(error_value),
+    }
+}
+
+async fn control_resume(
+    State(state): State<AppState>,
+    Json(request): Json<ControlSessionRequest>,
+) -> Response {
+    control_lifecycle(state, request.control_session_id, "resume").await
+}
+
+async fn control_pause(
+    State(state): State<AppState>,
+    Json(request): Json<ControlSessionRequest>,
+) -> Response {
+    control_lifecycle(state, request.control_session_id, "pause").await
+}
+
+async fn control_stop(
+    State(state): State<AppState>,
+    Json(request): Json<ControlSessionRequest>,
+) -> Response {
+    control_lifecycle(state, request.control_session_id, "stop").await
+}
+
+async fn control_heartbeat(
+    State(state): State<AppState>,
+    Json(request): Json<ControlSessionRequest>,
+) -> Response {
+    control_lifecycle(state, request.control_session_id, "heartbeat").await
+}
+
+async fn control_lifecycle(state: AppState, control_session_id: String, action: &str) -> Response {
+    let Some(simulation) = state.simulation else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulation_unavailable",
+            "simulation gateway is unavailable",
+        );
+    };
+    let result = match action {
+        "resume" => simulation.control_resume(&control_session_id).await,
+        "pause" => simulation.control_pause(&control_session_id).await,
+        "stop" => simulation.control_stop(&control_session_id).await,
+        "heartbeat" => simulation.control_heartbeat(&control_session_id).await,
+        _ => unreachable!("control lifecycle action is fixed by the router"),
+    };
+    match result {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error_value) => gateway_error(error_value),
     }
@@ -366,24 +435,50 @@ async fn control_input(State(state): State<AppState>, Json(input): Json<ControlI
         Ok(value) => value,
         Err(error_value) => return gateway_error(error_value),
     };
-    let mut queue = match state.control_queue.lock() {
-        Ok(value) => value,
-        Err(_) => {
+    let (ack, values) = {
+        let mut queue = match state.control_queue.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "control_queue_unavailable",
+                    "control queue is unavailable",
+                );
+            }
+        };
+        let ack = match queue.enqueue(
+            &input,
+            &session.control_session_id,
+            &session.status,
+            session.actuator_count,
+        ) {
+            Ok(value) => value,
+            Err(error_value) => return control_error(error_value),
+        };
+        let Some((_, values)) = queue.pop_latest() else {
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "control_queue_unavailable",
                 "control queue is unavailable",
             );
-        }
+        };
+        (ack, values)
     };
-    match queue.enqueue(
-        &input,
-        &session.control_session_id,
-        &session.status,
-        session.actuator_count,
-    ) {
-        Ok(value) => (StatusCode::ACCEPTED, Json(value)).into_response(),
-        Err(error_value) => control_error(error_value),
+    match simulation
+        .control_input(
+            &input.control_session_id,
+            input.sequence,
+            &input.source,
+            values,
+        )
+        .await
+    {
+        Ok(_) => {
+            let mut ack = ack;
+            ack.forwarded = true;
+            (StatusCode::ACCEPTED, Json(ack)).into_response()
+        }
+        Err(error_value) => gateway_error(error_value),
     }
 }
 
@@ -527,6 +622,26 @@ fn gateway_error(error_value: GatewayError) -> axum::response::Response {
             StatusCode::BAD_REQUEST,
             "invalid_control",
             "control is invalid",
+        ),
+        GatewayError::StaleSession => error(
+            StatusCode::CONFLICT,
+            "stale_session",
+            "control session is stale",
+        ),
+        GatewayError::ControlPaused => error(
+            StatusCode::CONFLICT,
+            "control_paused",
+            "control session is not active",
+        ),
+        GatewayError::WatchdogStopped => error(
+            StatusCode::CONFLICT,
+            "watchdog_stop",
+            "control watchdog stopped the session",
+        ),
+        GatewayError::QueueDropped => error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "queue_dropped",
+            "control event was dropped",
         ),
         GatewayError::InvalidBaseUrl | GatewayError::InvalidResponse => error(
             StatusCode::BAD_GATEWAY,

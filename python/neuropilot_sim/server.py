@@ -45,6 +45,17 @@ class SimulationService:
         self.error_count = 0
         self.control_session_id = secrets.token_hex(16)
         self.control_status = "paused"
+        self.last_control_monotonic: float | None = None
+        self.last_control_latency_ms: float | None = None
+        self.last_control_sequence = 0
+        self.watchdog_trips = 0
+        self.stop_count = 0
+        self.pause_count = 0
+        self.resume_count = 0
+        self.neutralization_count = 0
+        self.watchdog_stop = threading.Event()
+        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self.watchdog_thread.start()
 
     def _payload(self, state: FlyState) -> dict[str, Any]:
         payload = _state_payload(state)
@@ -84,6 +95,8 @@ class SimulationService:
             self.simulation.close()
             self.status = "closed"
             self.control_status = "disconnected"
+            self.watchdog_stop.set()
+        self.watchdog_thread.join(timeout=1.0)
 
     def restart(self) -> dict[str, Any]:
         with self.lock:
@@ -98,12 +111,20 @@ class SimulationService:
             self.last_step_latency_ms = None
             self.control_session_id = secrets.token_hex(16)
             self.control_status = "paused"
+            self.last_control_monotonic = None
+            self.last_control_sequence = 0
+            if self.watchdog_stop.is_set():
+                self.watchdog_stop = threading.Event()
+                self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+                self.watchdog_thread.start()
             return self._payload(self.simulation.reset())
 
     def control_session(self) -> dict[str, Any]:
         with self.lock:
             self.control_session_id = secrets.token_hex(16)
             self.control_status = "paused" if self.status == "live" else "disconnected"
+            self.last_control_monotonic = None
+            self.last_control_sequence = 0
             return self._control_payload()
 
     def control_reset(self) -> dict[str, Any]:
@@ -115,9 +136,98 @@ class SimulationService:
             self.reset_count += 1
             self.control_session_id = secrets.token_hex(16)
             self.control_status = "paused"
+            self.last_control_monotonic = None
+            self.last_control_sequence = 0
             payload = self._control_payload()
             payload["state"] = self._payload(state)
             return payload
+
+    def control_resume(self, control_session_id: str) -> dict[str, Any]:
+        with self.lock:
+            self._validate_control_session(control_session_id)
+            if self.status != "live":
+                raise RuntimeError("simulation is unavailable")
+            self.control_status = "active"
+            self.resume_count += 1
+            self.last_control_monotonic = time.monotonic()
+            return self._control_payload()
+
+    def control_pause(self, control_session_id: str) -> dict[str, Any]:
+        with self.lock:
+            self._validate_control_session(control_session_id)
+            self._neutralize_locked()
+            self.control_status = "paused"
+            self.pause_count += 1
+            self.last_control_monotonic = None
+            return self._control_payload()
+
+    def control_stop(self, control_session_id: str) -> dict[str, Any]:
+        with self.lock:
+            self._validate_control_session(control_session_id)
+            self._neutralize_locked()
+            self.control_status = "stopped"
+            self.stop_count += 1
+            self.last_control_monotonic = None
+            return self._control_payload()
+
+    def control_heartbeat(self, control_session_id: str) -> dict[str, Any]:
+        with self.lock:
+            self._validate_control_session(control_session_id)
+            if self.control_status != "active":
+                raise ValueError("control session is not active")
+            self.last_control_monotonic = time.monotonic()
+            return self._control_payload()
+
+    def control_input(
+        self,
+        control_session_id: str,
+        sequence: int,
+        values: list[float],
+        source: str,
+    ) -> dict[str, Any]:
+        with self.lock:
+            self._validate_control_session(control_session_id)
+            if self.control_status != "active":
+                raise ValueError("control session is not active")
+            if source not in {"keyboard", "gamepad"} or sequence <= self.last_control_sequence:
+                raise ValueError("control input is invalid")
+            if len(values) != self.simulation.control_size or any(
+                not math.isfinite(value) or abs(value) > CONTROL_AUTHORITY for value in values
+            ):
+                raise ValueError("control input is invalid")
+            started = time.perf_counter_ns()
+            state = self.simulation.step(values)
+            self.last_control_latency_ms = (time.perf_counter_ns() - started) / 1e6
+            self.last_control_sequence = sequence
+            self.last_control_monotonic = time.monotonic()
+            payload = self._control_payload()
+            payload["state"] = self._payload(state)
+            payload["forwarded"] = True
+            return payload
+
+    def _validate_control_session(self, control_session_id: str) -> None:
+        if control_session_id != self.control_session_id:
+            raise ValueError("control session is stale")
+
+    def _neutralize_locked(self) -> None:
+        if self.status == "live":
+            self.simulation.step([0.0] * self.simulation.control_size)
+            self.neutralization_count += 1
+
+    def _watchdog_loop(self) -> None:
+        while not self.watchdog_stop.wait(WATCHDOG_TIMEOUT_MS / 1000 / 10):
+            with self.lock:
+                if (
+                    self.control_status == "active"
+                    and self.last_control_monotonic is not None
+                    and time.monotonic() - self.last_control_monotonic
+                    > WATCHDOG_TIMEOUT_MS / 1000
+                ):
+                    self._neutralize_locked()
+                    self.control_status = "stopped"
+                    self.watchdog_trips += 1
+                    self.stop_count += 1
+                    self.last_control_monotonic = None
 
     def control_status_payload(self) -> dict[str, Any]:
         with self.lock:
@@ -136,7 +246,14 @@ class SimulationService:
             "queue_capacity": CONTROL_QUEUE_CAPACITY,
             "channels": ["forward", "lateral", "turn"],
             "actuator_count": self.simulation.control_size,
-            "sequence": 0,
+            "sequence": self.last_control_sequence,
+            "watchdog_trips": self.watchdog_trips,
+            "stop_count": self.stop_count,
+            "pause_count": self.pause_count,
+            "resume_count": self.resume_count,
+            "neutralization_count": self.neutralization_count,
+            "last_control_sequence": self.last_control_sequence,
+            "last_control_latency_ms": self.last_control_latency_ms,
         }
 
     def metrics(self) -> dict[str, Any]:
@@ -254,11 +371,38 @@ def make_server(service: SimulationService, port: int) -> ThreadingHTTPServer:
                     self._send(200, service.control_session())
                 elif self.path == "/api/v1/control/reset":
                     self._send(200, service.control_reset())
+                elif self.path == "/api/v1/control/resume":
+                    self._send(200, service.control_resume(body.get("control_session_id", "")))
+                elif self.path == "/api/v1/control/pause":
+                    self._send(200, service.control_pause(body.get("control_session_id", "")))
+                elif self.path == "/api/v1/control/stop":
+                    self._send(200, service.control_stop(body.get("control_session_id", "")))
+                elif self.path == "/api/v1/control/heartbeat":
+                    self._send(200, service.control_heartbeat(body.get("control_session_id", "")))
+                elif self.path == "/api/v1/control/input":
+                    self._send(
+                        200,
+                        service.control_input(
+                            body.get("control_session_id", ""),
+                            body.get("sequence", 0),
+                            body.get("control", []),
+                            body.get("source", ""),
+                        ),
+                    )
                 else:
                     self._send(404, {"code": "not_found", "message": "endpoint not found"})
             except (ValueError, json.JSONDecodeError) as exc:
                 service.record_error()
-                self._send(400, {"code": "invalid_request", "message": str(exc)})
+                message = str(exc)
+                if not self.path.startswith("/api/v1/control/"):
+                    status, code = 400, "invalid_request"
+                elif "stale" in message:
+                    status, code = 409, "stale_session"
+                elif "not active" in message:
+                    status, code = 409, "control_paused"
+                else:
+                    status, code = 400, "invalid_control"
+                self._send(status, {"code": code, "message": message})
             except RuntimeError:
                 service.record_error()
                 self._send(409, {"code": "simulation_closed", "message": "simulation is closed"})

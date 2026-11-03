@@ -53,12 +53,38 @@ pub struct ControlSession {
     pub channels: Vec<String>,
     pub actuator_count: usize,
     pub sequence: u64,
+    #[serde(default)]
+    pub watchdog_trips: u64,
+    #[serde(default)]
+    pub stop_count: u64,
+    #[serde(default)]
+    pub pause_count: u64,
+    #[serde(default)]
+    pub resume_count: u64,
+    #[serde(default)]
+    pub neutralization_count: u64,
+    #[serde(default)]
+    pub last_control_sequence: u64,
+    #[serde(default)]
+    pub last_control_latency_ms: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ControlForwardResponse {
+    pub schema_version: u32,
+    pub control_session_id: String,
+    pub sequence: u64,
+    pub forwarded: bool,
 }
 
 #[derive(Debug)]
 pub enum GatewayError {
     InvalidBaseUrl,
     InvalidControl,
+    StaleSession,
+    ControlPaused,
+    WatchdogStopped,
+    QueueDropped,
     Timeout,
     Unavailable,
     Remote(StatusCode),
@@ -70,6 +96,10 @@ impl fmt::Display for GatewayError {
         let message = match self {
             Self::InvalidBaseUrl => "simulation base URL is invalid",
             Self::InvalidControl => "simulation control is invalid",
+            Self::StaleSession => "control session is stale",
+            Self::ControlPaused => "control session is not active",
+            Self::WatchdogStopped => "control watchdog stopped the session",
+            Self::QueueDropped => "control event was dropped",
             Self::Timeout => "simulation service timed out",
             Self::Unavailable => "simulation service is unavailable",
             Self::Remote(_) => "simulation service returned an error",
@@ -214,12 +244,92 @@ impl SimulationGateway {
         self.decode_control_session(response).await
     }
 
+    pub async fn control_resume(
+        &self,
+        control_session_id: &str,
+    ) -> Result<ControlSession, GatewayError> {
+        self.control_lifecycle("resume", control_session_id).await
+    }
+
+    pub async fn control_pause(
+        &self,
+        control_session_id: &str,
+    ) -> Result<ControlSession, GatewayError> {
+        self.control_lifecycle("pause", control_session_id).await
+    }
+
+    pub async fn control_stop(
+        &self,
+        control_session_id: &str,
+    ) -> Result<ControlSession, GatewayError> {
+        self.control_lifecycle("stop", control_session_id).await
+    }
+
+    pub async fn control_heartbeat(
+        &self,
+        control_session_id: &str,
+    ) -> Result<ControlSession, GatewayError> {
+        self.control_lifecycle("heartbeat", control_session_id)
+            .await
+    }
+
+    pub async fn control_input(
+        &self,
+        control_session_id: &str,
+        sequence: u64,
+        source: &str,
+        values: Vec<f64>,
+    ) -> Result<ControlForwardResponse, GatewayError> {
+        let response = self
+            .client
+            .post(self.url("/api/v1/control/input"))
+            .json(&serde_json::json!({
+                "control_session_id": control_session_id,
+                "sequence": sequence,
+                "source": source,
+                "control": values,
+            }))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        if !response.status().is_success() {
+            return Err(map_control_response(response).await);
+        }
+        let value = response
+            .json::<ControlForwardResponse>()
+            .await
+            .map_err(|_| GatewayError::InvalidResponse)?;
+        if value.schema_version != CONTROL_SCHEMA_VERSION
+            || value.control_session_id != control_session_id
+            || value.sequence != sequence
+            || !value.forwarded
+        {
+            return Err(GatewayError::InvalidResponse);
+        }
+        Ok(value)
+    }
+
+    async fn control_lifecycle(
+        &self,
+        action: &str,
+        control_session_id: &str,
+    ) -> Result<ControlSession, GatewayError> {
+        let response = self
+            .client
+            .post(self.url(&format!("/api/v1/control/{action}")))
+            .json(&serde_json::json!({"control_session_id": control_session_id}))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        self.decode_control_session(response).await
+    }
+
     async fn decode_control_session(
         &self,
         response: reqwest::Response,
     ) -> Result<ControlSession, GatewayError> {
         if !response.status().is_success() {
-            return Err(GatewayError::Remote(response.status()));
+            return Err(map_control_response(response).await);
         }
         let value = response
             .json::<ControlSession>()
@@ -247,6 +357,28 @@ impl SimulationGateway {
             .map_err(|_| GatewayError::InvalidResponse)?;
         validate_state(&state)?;
         Ok(state)
+    }
+}
+
+async fn map_control_response(response: reqwest::Response) -> GatewayError {
+    let status = response.status();
+    let code = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|value| {
+            value
+                .get("code")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        });
+    match code.as_deref() {
+        Some("stale_session") => GatewayError::StaleSession,
+        Some("control_paused") => GatewayError::ControlPaused,
+        Some("watchdog_stop") => GatewayError::WatchdogStopped,
+        Some("queue_dropped") => GatewayError::QueueDropped,
+        Some("invalid_control") => GatewayError::InvalidControl,
+        _ => GatewayError::Remote(status),
     }
 }
 
@@ -323,7 +455,7 @@ mod tests {
     }
 
     fn control_body() -> &'static str {
-        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"actuator_count":42,"sequence":0}"#
+        r#"{"schema_version":1,"data_kind":"simulated-live","control_session_id":"control-session","simulator_session_id":"simulator-session","status":"paused","simulator_status":"live","control_authority":0.25,"watchdog_timeout_ms":250,"queue_capacity":32,"channels":["forward","lateral","turn"],"actuator_count":42,"sequence":0,"watchdog_trips":0,"stop_count":0,"pause_count":0,"resume_count":0,"neutralization_count":0,"last_control_sequence":0,"last_control_latency_ms":null}"#
     }
 
     async fn mock_once(

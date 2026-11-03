@@ -157,8 +157,11 @@ impl ControlQueue {
             .map(|item| (item.sequence, item.values))
     }
 
-    pub fn clear(&mut self) {
+    pub fn reset(&mut self) {
         self.pending.clear();
+        self.last_sequence = 0;
+        self.dropped_events = 0;
+        self.coalesced_events = 0;
     }
 
     pub fn last_sequence(&self) -> u64 {

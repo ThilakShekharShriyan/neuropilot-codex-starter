@@ -151,6 +151,36 @@ def test_control_http_session_and_status_endpoints() -> None:
         service.close()
 
 
+def test_control_lifecycle_input_and_watchdog() -> None:
+    service = SimulationService(FlySimulation())
+    session = service.control_session()
+    control_id = session["control_session_id"]
+    assert service.control_resume(control_id)["status"] == "active"
+    forwarded = service.control_input(control_id, 1, [0.1] * session["actuator_count"], "keyboard")
+    assert forwarded["forwarded"] is True
+    assert forwarded["last_control_sequence"] == 1
+    assert service.control_heartbeat(control_id)["status"] == "active"
+    assert service.control_pause(control_id)["status"] == "paused"
+    assert service.control_stop(control_id)["status"] == "stopped"
+    reset = service.control_reset()
+    assert reset["status"] == "paused"
+    service.close()
+
+
+def test_control_watchdog_neutralizes_and_stops() -> None:
+    service = SimulationService(FlySimulation())
+    control_id = service.control_session()["control_session_id"]
+    service.control_resume(control_id)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and service.control_status_payload()["status"] != "stopped":
+        time.sleep(0.02)
+    status = service.control_status_payload()
+    assert status["status"] == "stopped"
+    assert status["watchdog_trips"] == 1
+    assert status["neutralization_count"] == 1
+    service.close()
+
+
 def test_concurrent_requests_count_without_lost_increments() -> None:
     service = SimulationService(FlySimulation())
     server = make_server(service, 0)
